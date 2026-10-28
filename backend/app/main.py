@@ -14,12 +14,8 @@ from pydantic import BaseModel, Field
 from .db import connect, init_db
 from .vision import Vision
 
-# Uploaded per-person greeting clips live on disk, referenced by filename in DB.
-GREETING_DIR = Path(__file__).resolve().parents[1] / "media" / "greetings"
-GREETING_DIR.mkdir(parents=True, exist_ok=True)
-# Snapshots of unknown visitors awaiting "who was this?" identification.
-UNKNOWN_DIR = Path(__file__).resolve().parents[1] / "media" / "unknowns"
-UNKNOWN_DIR.mkdir(parents=True, exist_ok=True)
+# Writable data locations (greeting clips, unknown snapshots). Created by paths.
+from .paths import GREETING_DIR, UNKNOWN_DIR, WEB_DIR
 UNKNOWN_DEDUP_SIMILARITY = 0.55  # skip a new snapshot if a similar one is already pending
 # Allowed upload types -> file extension used on disk.
 AUDIO_EXTS = {"audio/mpeg": ".mp3", "audio/mp3": ".mp3", "audio/wav": ".wav",
@@ -598,3 +594,8 @@ async def recognize(frame: UploadFile = File(...)):
             "embedding": face["embedding"] if person is None else None,
         })
     return {"faces": output, "processed_at": now()}
+
+# Serve the built web UI (packaged app). Mounted LAST so /api/* routes win.
+if WEB_DIR.exists():
+    from fastapi.staticfiles import StaticFiles
+    app.mount("/", StaticFiles(directory=str(WEB_DIR), html=True), name="web")

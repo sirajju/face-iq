@@ -1,10 +1,9 @@
-from pathlib import Path
 import cv2
 import numpy as np
+from .paths import MODELS_DIR
 
-BASE = Path(__file__).resolve().parents[1]
-DETECTOR_PATH = BASE / "models" / "face_detection_yunet_2023mar.onnx"
-RECOGNIZER_PATH = BASE / "models" / "face_recognition_sface_2021dec.onnx"
+DETECTOR_PATH = MODELS_DIR / "face_detection_yunet_2023mar.onnx"
+RECOGNIZER_PATH = MODELS_DIR / "face_recognition_sface_2021dec.onnx"
 
 class Vision:
     def __init__(self):
