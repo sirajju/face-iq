@@ -15,7 +15,15 @@ app.add_middleware(
     allow_credentials=False, allow_methods=["*"], allow_headers=["*"],
 )
 vision = None
-MATCH_THRESHOLD = 0.363  # OpenCV SFace cosine similarity; tune with consented test samples.
+# OpenCV SFace cosine similarity. 0.363 is OpenCV's default but is tuned for
+# clean frontal crops and accepts too many look-alikes; 0.42 is stricter to
+# avoid matching different people. False matches -> raise it; missed real
+# matches -> lower it. Tune with consented test samples.
+MATCH_THRESHOLD = 0.42
+# Only attempt identification on good-quality faces. Angled, turned-away, or
+# low-confidence crops yield unreliable embeddings that cause false matches,
+# so such faces are still tracked (boxed/logged) but reported as "Unknown".
+IDENTIFY_MIN_DETECTION = 0.90
 
 def now():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -195,7 +203,15 @@ async def recognize(frame: UploadFile = File(...)):
     output = []
     for face in faces:
         embedding = np.asarray(face["embedding"], dtype=np.float32)
-        person, score = match_embedding(embedding)
+        # Gate identification on face quality: a turned-away or low-confidence
+        # crop is tracked but not matched, so we don't label a stranger as a
+        # saved person. The face is still detected, boxed and logged either way.
+        clear_enough = (face["detection_score"] >= IDENTIFY_MIN_DETECTION
+                        and face["facing"] == "Looking at camera")
+        if clear_enough:
+            person, score = match_embedding(embedding)
+        else:
+            person, score = None, 0.0
         display = "Unknown visitor"
         person_id = None
         if person is not None:
@@ -239,6 +255,8 @@ async def recognize(frame: UploadFile = File(...)):
             "similarity": round(score, 3), "box": face["box"],
             "expression": face["expression"], "expression_note": face["expression_note"],
             "facing": face["facing"], "detection_score": face["detection_score"],
+            # Whether this face was clear enough to attempt identification.
+            "recognizable": clear_enough,
             # Embedding is returned so an unknown face can be named & saved from
             # the live view without re-capturing dedicated enrollment samples.
             "embedding": face["embedding"] if person is None else None,
