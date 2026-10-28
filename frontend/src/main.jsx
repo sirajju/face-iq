@@ -73,6 +73,11 @@ function App() {
   const greetedRef = useRef({}); // person_id -> last alert time (ms), debounce
   const audioRef = useRef(null); // lazily-created AudioContext for the chime
   const tracksRef = useRef([]); // unknown-face tracklets for the grace window
+  const ownerLastSeenRef = useRef(0); // ms when an Owner was last in view
+  const ownerPresentRef = useRef(true); // Owner visible in the latest frame?
+  const ownerCfgRef = useRef({ armed: false, grace: 20, ownerIds: new Set() });
+  const lockingRef = useRef(false); // guard against duplicate lock calls
+  const [lockCountdown, setLockCountdown] = useState(null);
   const [captures, setCaptures] = useState([]);
   const [captureNames, setCaptureNames] = useState({});
   const [ownerStatus, setOwnerStatus] = useState({
@@ -136,6 +141,54 @@ function App() {
     const id = setInterval(refresh, 10000);
     return () => clearInterval(id);
   }, [refresh]);
+  // Keep auto-lock config in a ref so the capture/timer loops always read the
+  // latest values (they run inside intervals that would otherwise close over
+  // stale state).
+  useEffect(() => {
+    ownerCfgRef.current = {
+      armed: !!ownerStatus.auto_lock_armed,
+      grace: ownerStatus.auto_lock_grace || 20,
+      ownerIds: new Set(people.filter((p) => p.is_owner).map((p) => p.id)),
+    };
+  }, [people, ownerStatus]);
+  // Auto-lock timer: while the camera is on, count down whenever no Owner is in
+  // view, and ask the backend to LOCK (never unlock) when it reaches zero.
+  useEffect(() => {
+    if (!cameraOn) {
+      setLockCountdown(null);
+      return;
+    }
+    const id = setInterval(() => {
+      const cfg = ownerCfgRef.current;
+      if (!cfg.armed || cfg.ownerIds.size === 0) {
+        setLockCountdown(null);
+        return;
+      }
+      if (ownerPresentRef.current) {
+        setLockCountdown(null);
+        return;
+      }
+      const remaining = Math.ceil(
+        cfg.grace - (Date.now() - ownerLastSeenRef.current) / 1000,
+      );
+      if (remaining > 0) {
+        setLockCountdown(remaining);
+        return;
+      }
+      setLockCountdown(0);
+      if (!lockingRef.current) {
+        lockingRef.current = true;
+        request("/lock", { method: "POST" })
+          .catch(() => {})
+          .finally(() => {
+            ownerLastSeenRef.current = Date.now() + 30000; // post-lock cooldown
+            lockingRef.current = false;
+            setLockCountdown(null);
+          });
+      }
+    }, 1000);
+    return () => clearInterval(id);
+  }, [cameraOn]);
   const stopCamera = useCallback(() => {
     if (timerRef.current) clearInterval(timerRef.current);
     timerRef.current = null;
@@ -164,6 +217,9 @@ function App() {
       }
       setCameraOn(true);
       setNotice("");
+      // Warm-up baseline so auto-lock doesn't fire before recognition settles.
+      ownerPresentRef.current = true;
+      ownerLastSeenRef.current = Date.now();
       timerRef.current = setInterval(captureFrame, 1200);
     } catch (e) {
       setNotice(
@@ -210,6 +266,13 @@ function App() {
       data.faces.forEach((f) => f.known && alertRecognized(f));
       // Track unknowns; snapshot one only after it persists past the grace window.
       updateTracks(data.faces);
+      // Auto-lock: note whether an Owner is in view this frame.
+      const owners = ownerCfgRef.current.ownerIds;
+      const ownerVisible = data.faces.some(
+        (f) => f.known && owners.has(f.person_id),
+      );
+      ownerPresentRef.current = ownerVisible;
+      if (ownerVisible) ownerLastSeenRef.current = Date.now();
       if (data.faces.some((f) => f.known)) refresh();
     } catch (e) {
       setNotice(e.message);
@@ -841,6 +904,14 @@ function App() {
                   </span>
                   <span>NO CLOUD UPLOAD</span>
                 </div>
+                {cameraOn && lockCountdown !== null && (
+                  <div className="lock-countdown">
+                    <ShieldCheck size={18} />
+                    {lockCountdown > 0
+                      ? `Owner away — locking in ${lockCountdown}s`
+                      : "Locking…"}
+                  </div>
+                )}
               </div>
               <div className="camera-footer">
                 <div className="camera-meta">

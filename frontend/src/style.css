@@ -39,3 +39,6 @@
 .autolock-row>b{color:#e8eef6;flex:1}
 .autolock-row>b.armed{color:#5ed8a8}
 .autolock-row button{margin-left:auto}
+
+/* Auto-lock countdown overlay on the live camera */
+.lock-countdown{position:absolute;top:12px;left:50%;transform:translateX(-50%);display:flex;align-items:center;gap:8px;background:rgba(255,140,80,.92);color:#2b1403;font-weight:700;font-size:13px;padding:8px 14px;border-radius:8px;box-shadow:0 6px 18px rgba(0,0,0,.35);z-index:5}

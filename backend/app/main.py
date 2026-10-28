@@ -424,6 +424,22 @@ def set_person_owner(person_id: int, body: OwnerFlagBody):
         updated = con.execute("SELECT * FROM people WHERE id=?", (person_id,)).fetchone()
     return public_person(updated)
 
+@app.post("/api/lock")
+def lock_now():
+    """Lock the Windows workstation. Called by the frontend auto-lock timer when
+    the Owner has been absent past the grace period. Locking is safe and
+    recoverable (your normal Windows sign-in reverses it); it stores/uses no
+    credentials and never unlocks. Gated on auto-lock being armed."""
+    with connect() as con:
+        if get_setting(con, "auto_lock_armed", "0") != "1":
+            raise HTTPException(400, "Auto-lock is not armed.")
+    try:
+        import ctypes
+        ctypes.windll.user32.LockWorkStation()
+    except Exception as exc:
+        raise HTTPException(500, f"Lock failed: {exc}")
+    return {"ok": True, "locked_at": now()}
+
 @app.post("/api/owner/auto-lock")
 def set_auto_lock(body: AutoLockBody):
     with connect() as con:
