@@ -591,12 +591,12 @@ function App() {
                         <button
                           className="secondary small-button"
                           title={
-                            f.recognizable
+                            f.enroll_ready
                               ? "Name & save this person"
                               : "Ask them to look at the camera before saving"
                           }
                           disabled={
-                            !Array.isArray(f.embedding) || !f.recognizable
+                            !Array.isArray(f.embedding) || !f.enroll_ready
                           }
                           onClick={() => openQuick(f)}
                         >

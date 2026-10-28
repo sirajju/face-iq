@@ -20,10 +20,14 @@ vision = None
 # avoid matching different people. False matches -> raise it; missed real
 # matches -> lower it. Tune with consented test samples.
 MATCH_THRESHOLD = 0.42
-# Only attempt identification on good-quality faces. Angled, turned-away, or
-# low-confidence crops yield unreliable embeddings that cause false matches,
-# so such faces are still tracked (boxed/logged) but reported as "Unknown".
+# Side/profile faces are identified too, but their embeddings are noisier, so
+# they must clear a higher similarity bar to avoid false matches.
+SIDE_MATCH_THRESHOLD = 0.50
+# Minimum detection confidence to even attempt identification. Frontal faces
+# must be clearly detected; side faces are allowed a bit lower. Turned-fully-
+# away faces are still tracked (boxed/logged) but never identified.
 IDENTIFY_MIN_DETECTION = 0.90
+SIDE_MIN_DETECTION = 0.80
 
 def now():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -39,7 +43,7 @@ def public_person(row):
 def embedding_from_blob(blob):
     return np.frombuffer(blob, dtype=np.float32)
 
-def match_embedding(embedding):
+def match_embedding(embedding, threshold=MATCH_THRESHOLD):
     best, best_score = None, -1.0
     with connect() as con:
         rows = con.execute("SELECT * FROM people WHERE consent=1").fetchall()
@@ -50,7 +54,7 @@ def match_embedding(embedding):
         score = float(np.dot(embedding, saved) / ((np.linalg.norm(embedding)*np.linalg.norm(saved))+1e-12))
         if score > best_score:
             best, best_score = row, score
-    if best is not None and best_score >= MATCH_THRESHOLD:
+    if best is not None and best_score >= threshold:
         return best, best_score
     return None, max(0.0, best_score)
 
@@ -203,15 +207,21 @@ async def recognize(frame: UploadFile = File(...)):
     output = []
     for face in faces:
         embedding = np.asarray(face["embedding"], dtype=np.float32)
-        # Gate identification on face quality: a turned-away or low-confidence
-        # crop is tracked but not matched, so we don't label a stranger as a
-        # saved person. The face is still detected, boxed and logged either way.
-        clear_enough = (face["detection_score"] >= IDENTIFY_MIN_DETECTION
-                        and face["facing"] == "Looking at camera")
-        if clear_enough:
+        # Gate identification on face quality. Frontal and side faces are both
+        # identified (side faces need a stricter similarity bar); only a fully
+        # turned-away or low-confidence crop is tracked without being matched,
+        # so we don't label a stranger as a saved person. Either way the face
+        # is still detected, boxed and logged.
+        facing, det = face["facing"], face["detection_score"]
+        if facing == "Looking at camera" and det >= IDENTIFY_MIN_DETECTION:
             person, score = match_embedding(embedding)
+            clear_enough = True
+        elif facing == "Turned to the side" and det >= SIDE_MIN_DETECTION:
+            person, score = match_embedding(embedding, SIDE_MATCH_THRESHOLD)
+            clear_enough = True
         else:
             person, score = None, 0.0
+            clear_enough = False
         display = "Unknown visitor"
         person_id = None
         if person is not None:
@@ -257,6 +267,9 @@ async def recognize(frame: UploadFile = File(...)):
             "facing": face["facing"], "detection_score": face["detection_score"],
             # Whether this face was clear enough to attempt identification.
             "recognizable": clear_enough,
+            # Enrollment needs a frontal, high-quality face for a good embedding.
+            "enroll_ready": (face["facing"] == "Looking at camera"
+                             and face["detection_score"] >= IDENTIFY_MIN_DETECTION),
             # Embedding is returned so an unknown face can be named & saved from
             # the live view without re-capturing dedicated enrollment samples.
             "embedding": face["embedding"] if person is None else None,
