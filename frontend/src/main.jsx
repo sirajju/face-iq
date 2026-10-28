@@ -365,11 +365,16 @@ function App() {
   };
   const updateProfile = async () => {
     if (!selected) return;
+    if (!selected.name || !selected.name.trim()) {
+      setNotice("Name cannot be empty.");
+      return;
+    }
     try {
       await request(`/people/${selected.id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          name: selected.name,
           notes: selected.notes,
           interests: selected.interests,
           greeting: selected.greeting || "",
@@ -1347,6 +1352,15 @@ function App() {
                 <X size={18} />
               </button>
             </div>
+            <label>
+              Full name
+              <input
+                value={selected.name}
+                onChange={(e) =>
+                  setSelected({ ...selected, name: e.target.value })
+                }
+              />
+            </label>
             <label>
               Interests & preferences
               <input

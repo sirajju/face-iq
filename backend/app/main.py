@@ -177,6 +177,7 @@ def delete_person(person_id: int):
     return {"ok": True}
 
 class UpdateBody(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
     notes: str = Field(default="", max_length=2000)
     interests: str = Field(default="", max_length=500)
     greeting: str = Field(default="", max_length=200)
@@ -184,8 +185,8 @@ class UpdateBody(BaseModel):
 @app.patch("/api/people/{person_id}")
 def update_person(person_id: int, body: UpdateBody):
     with connect() as con:
-        cur = con.execute("UPDATE people SET notes=?, interests=?, greeting=? WHERE id=?",
-                          (body.notes, body.interests, body.greeting.strip(), person_id))
+        cur = con.execute("UPDATE people SET name=?, notes=?, interests=?, greeting=? WHERE id=?",
+                          (body.name.strip(), body.notes, body.interests, body.greeting.strip(), person_id))
         if cur.rowcount == 0:
             raise HTTPException(404, "Person not found.")
         row = con.execute("SELECT * FROM people WHERE id=?", (person_id,)).fetchone()
