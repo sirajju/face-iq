@@ -80,6 +80,16 @@ def cosine(a, b):
     return float(np.dot(a, b) / ((np.linalg.norm(a) * np.linalg.norm(b)) + 1e-12))
 
 
+def open_camera(index):
+    """Open the webcam, trying backends in order. Returns a cap or None."""
+    for backend in (cv2.CAP_DSHOW, cv2.CAP_MSMF, cv2.CAP_ANY):
+        cap = cv2.VideoCapture(index, backend)
+        if cap.isOpened():
+            return cap
+        cap.release()
+    return None
+
+
 def scan(vision, frame, owners):
     """Return (owner_seen, stranger_seen) for the faces in this frame."""
     ok, buf = cv2.imencode(".jpg", frame)
@@ -150,6 +160,7 @@ def main():
     cap = None
     last_seen_owner = time.time() + STARTUP_GRACE_SECONDS  # warm-up
     owner_was_present = True  # avoid a spurious "welcome back" on first sight
+    read_fail = 0
     try:
         while True:
             armed, db_grace = read_settings()
@@ -168,20 +179,34 @@ def main():
                 continue
 
             if cap is None:
-                cap = cv2.VideoCapture(args.camera, cv2.CAP_DSHOW)
-                if not cap.isOpened():
-                    log(f"Could not open camera {args.camera}; retrying…")
-                    cap = None
+                cap = open_camera(args.camera)
+                if cap is None:
+                    log(f"Camera {args.camera} is in use or unavailable - it's "
+                        "likely held by another app (the FaceIQ Live view, Zoom, "
+                        "Teams, the Camera app). Close that so auto-lock can see "
+                        "the webcam. Retrying…")
                     time.sleep(POLL_SECONDS)
                     continue
                 last_seen_owner = time.time()  # fresh warm-up when (re)opening
                 owner_was_present = True
+                read_fail = 0
 
             ok, frame = cap.read()
             if not ok or frame is None:
-                # Camera unavailable (e.g., PC already locked). Do nothing.
+                # Opened but no frames: camera busy (another app holds it) OR the
+                # PC is locked. Warn clearly, and periodically reopen to recover.
+                read_fail += 1
+                if read_fail == 3 or read_fail % 15 == 0:
+                    log("Camera opened but returns no frames - it's likely in use "
+                        "by another app (the FaceIQ Live view, Zoom, Teams, the "
+                        "Camera app), or the PC is locked. Close the other app so "
+                        "auto-lock can access the webcam.")
+                if read_fail % 15 == 0:
+                    cap.release()
+                    cap = None
                 time.sleep(POLL_SECONDS)
                 continue
+            read_fail = 0
 
             owner_seen, stranger_seen = scan(vision, frame, owners)
             now = time.time()
