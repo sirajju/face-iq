@@ -75,9 +75,12 @@ function App() {
   const tracksRef = useRef([]); // unknown-face tracklets for the grace window
   const ownerLastSeenRef = useRef(0); // ms when an Owner was last in view
   const ownerPresentRef = useRef(true); // Owner visible in the latest frame?
+  const ownerWasPresentRef = useRef(true); // for absent->present (welcome back)
+  const lastWelcomeRef = useRef(0); // debounce the welcome-back greeting
   const ownerCfgRef = useRef({ armed: false, grace: 20, ownerIds: new Set() });
   const lockingRef = useRef(false); // guard against duplicate lock calls
   const [lockCountdown, setLockCountdown] = useState(null);
+  const [welcomeBanner, setWelcomeBanner] = useState(null);
   const [captures, setCaptures] = useState([]);
   const [captureNames, setCaptureNames] = useState({});
   const [ownerStatus, setOwnerStatus] = useState({
@@ -197,6 +200,9 @@ function App() {
     streamRef.current = null;
     if (videoRef.current) videoRef.current.srcObject = null;
     tracksRef.current = [];
+    ownerWasPresentRef.current = true;
+    setLockCountdown(null);
+    setWelcomeBanner(null);
     setCameraOn(false);
     setFaces([]);
   }, []);
@@ -219,6 +225,7 @@ function App() {
       setNotice("");
       // Warm-up baseline so auto-lock doesn't fire before recognition settles.
       ownerPresentRef.current = true;
+      ownerWasPresentRef.current = true;
       ownerLastSeenRef.current = Date.now();
       timerRef.current = setInterval(captureFrame, 1200);
     } catch (e) {
@@ -262,17 +269,21 @@ function App() {
           "Unknown visitor detected — name them below to recognize them next time.",
         );
       else setNotice("");
+      // Auto-lock: note whether an Owner is in view this frame, and greet them
+      // when they come back after being away (absent -> present transition).
+      const owners = ownerCfgRef.current.ownerIds;
+      const ownerFace = data.faces.find(
+        (f) => f.known && owners.has(f.person_id),
+      );
+      const ownerVisible = !!ownerFace;
+      if (ownerVisible && !ownerWasPresentRef.current) welcomeBackOwner(ownerFace);
+      ownerWasPresentRef.current = ownerVisible;
+      ownerPresentRef.current = ownerVisible;
+      if (ownerVisible) ownerLastSeenRef.current = Date.now();
       // Sound / voice / desktop alerts fire only for recognized, registered people.
       data.faces.forEach((f) => f.known && alertRecognized(f));
       // Track unknowns; snapshot one only after it persists past the grace window.
       updateTracks(data.faces);
-      // Auto-lock: note whether an Owner is in view this frame.
-      const owners = ownerCfgRef.current.ownerIds;
-      const ownerVisible = data.faces.some(
-        (f) => f.known && owners.has(f.person_id),
-      );
-      ownerPresentRef.current = ownerVisible;
-      if (ownerVisible) ownerLastSeenRef.current = Date.now();
       if (data.faces.some((f) => f.known)) refresh();
     } catch (e) {
       setNotice(e.message);
@@ -641,6 +652,24 @@ function App() {
     if (alerts.desktop)
       notify("FaceIQ — recognized", `${face.name} is in view.`);
   };
+  // Owner is back in view after being away. Shows a prominent in-app banner
+  // (OS notifications are hidden on the lock screen, so we don't rely on them)
+  // plus voice/chime. Debounced so a brief flicker doesn't spam it.
+  const welcomeBackOwner = (face) => {
+    const now = Date.now();
+    if (now - lastWelcomeRef.current < 10000) return;
+    lastWelcomeRef.current = now;
+    const name = face?.name || "Owner";
+    setWelcomeBanner(name);
+    setTimeout(() => setWelcomeBanner((n) => (n === name ? null : n)), 6000);
+    if (alerts.chime) playChime();
+    if (alerts.voice) {
+      if (face?.has_greeting_audio) playGreetingAudio(face.person_id);
+      else speak(face?.greeting || `Welcome back, ${name}`);
+    }
+    // Suppress the generic recognition greeting this cycle to avoid doubling.
+    if (face?.person_id != null) greetedRef.current[face.person_id] = now;
+  };
   // Snapshot the current frame and send it for "who was this?" review.
   const captureUnknownSnapshot = () => {
     const c = canvasRef.current;
@@ -910,6 +939,11 @@ function App() {
                     {lockCountdown > 0
                       ? `Owner away — locking in ${lockCountdown}s`
                       : "Locking…"}
+                  </div>
+                )}
+                {cameraOn && welcomeBanner && (
+                  <div className="welcome-banner">
+                    <Check size={18} /> Welcome back, {welcomeBanner}
                   </div>
                 )}
               </div>

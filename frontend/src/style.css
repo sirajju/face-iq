@@ -42,3 +42,7 @@
 
 /* Auto-lock countdown overlay on the live camera */
 .lock-countdown{position:absolute;top:12px;left:50%;transform:translateX(-50%);display:flex;align-items:center;gap:8px;background:rgba(255,140,80,.92);color:#2b1403;font-weight:700;font-size:13px;padding:8px 14px;border-radius:8px;box-shadow:0 6px 18px rgba(0,0,0,.35);z-index:5}
+
+/* Owner "welcome back" banner on the live camera */
+.welcome-banner{position:absolute;top:12px;left:50%;transform:translateX(-50%);display:flex;align-items:center;gap:8px;background:rgba(94,216,168,.95);color:#06130d;font-weight:700;font-size:14px;padding:9px 16px;border-radius:9px;box-shadow:0 6px 18px rgba(0,0,0,.35);z-index:6;animation:welcomePop .3s ease}
+@keyframes welcomePop{from{opacity:0;transform:translateX(-50%) translateY(-6px)}to{opacity:1;transform:translateX(-50%) translateY(0)}}
