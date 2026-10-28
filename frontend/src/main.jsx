@@ -62,6 +62,8 @@ function App() {
     timerRef = useRef(null),
     busyRef = useRef(false);
   const unknownBufRef = useRef([]);
+  const greetedRef = useRef({}); // person_id -> last alert time (ms), debounce
+  const audioRef = useRef(null); // lazily-created AudioContext for the chime
   const [form, setForm] = useState({
     name: "",
     notes: "",
@@ -73,6 +75,24 @@ function App() {
   const [quickTarget, setQuickTarget] = useState(null);
   const [quickName, setQuickName] = useState("");
   const [quickSaving, setQuickSaving] = useState(false);
+  // Recognition alerts — fire ONLY for registered/recognized people. Persisted.
+  const [alerts, setAlerts] = useState(() => {
+    try {
+      return {
+        chime: true,
+        voice: true,
+        desktop: false,
+        ...JSON.parse(localStorage.getItem("faceiq_alerts") || "{}"),
+      };
+    } catch {
+      return { chime: true, voice: true, desktop: false };
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem("faceiq_alerts", JSON.stringify(alerts));
+    } catch {}
+  }, [alerts]);
 
   const refresh = useCallback(async () => {
     try {
@@ -164,6 +184,8 @@ function App() {
           "Unknown visitor detected — name them below to recognize them next time.",
         );
       else setNotice("");
+      // Sound / voice / desktop alerts fire only for recognized, registered people.
+      data.faces.forEach((f) => f.known && alertRecognized(f));
       if (data.faces.some((f) => f.known)) refresh();
     } catch (e) {
       setNotice(e.message);
@@ -302,6 +324,7 @@ function App() {
         body: JSON.stringify({
           notes: selected.notes,
           interests: selected.interests,
+          greeting: selected.greeting || "",
         }),
       });
       setNotice("Profile updated.");
@@ -310,12 +333,56 @@ function App() {
       setNotice(e.message);
     }
   };
-  const speak = (name) => {
+  const speak = (text) => {
     if ("speechSynthesis" in window) {
       window.speechSynthesis.cancel();
-      const u = new SpeechSynthesisUtterance(`Welcome back, ${name}`);
+      const u = new SpeechSynthesisUtterance(text);
       window.speechSynthesis.speak(u);
     }
+  };
+  // Short two-note chime via Web Audio — no asset files needed.
+  const playChime = () => {
+    try {
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      if (!Ctx) return;
+      if (!audioRef.current) audioRef.current = new Ctx();
+      const ctx = audioRef.current;
+      if (ctx.state === "suspended") ctx.resume();
+      [
+        [880, 0],
+        [1320, 0.12],
+      ].forEach(([freq, at]) => {
+        const osc = ctx.createOscillator(),
+          gain = ctx.createGain();
+        osc.type = "sine";
+        osc.frequency.value = freq;
+        const t = ctx.currentTime + at;
+        gain.gain.setValueAtTime(0.0001, t);
+        gain.gain.exponentialRampToValueAtTime(0.25, t + 0.02);
+        gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.18);
+        osc.connect(gain).connect(ctx.destination);
+        osc.start(t);
+        osc.stop(t + 0.2);
+      });
+    } catch {}
+  };
+  const notify = (title, body) => {
+    try {
+      if ("Notification" in window && Notification.permission === "granted")
+        new Notification(title, { body, silent: true });
+    } catch {}
+  };
+  // Fire alerts for a recognized person, debounced to once per 60s per person.
+  const alertRecognized = (face) => {
+    if (!face.known || face.person_id == null) return;
+    const now = Date.now();
+    const last = greetedRef.current[face.person_id] || 0;
+    if (now - last < 60000) return;
+    greetedRef.current[face.person_id] = now;
+    if (alerts.chime) playChime();
+    if (alerts.voice) speak(face.greeting || `Welcome back, ${face.name}`);
+    if (alerts.desktop)
+      notify("FaceIQ — recognized", `${face.name} is in view.`);
   };
   // Map a detection box (raw, un-mirrored frame coords) onto the on-screen
   // video, accounting for object-fit:cover cropping and the scaleX(-1) mirror.
@@ -583,7 +650,9 @@ function App() {
                         <button
                           className="round-button"
                           title="Voice greeting"
-                          onClick={() => speak(f.name)}
+                          onClick={() =>
+                            speak(f.greeting || `Welcome back, ${f.name}`)
+                          }
                         >
                           <AudioLines size={16} />
                         </button>
@@ -883,13 +952,62 @@ function App() {
               <div className="settings-icon">
                 <Mic />
               </div>
-              <h2>Voice greeting</h2>
+              <h2>Recognition alerts</h2>
               <p>
-                Voice greetings use your browser's built-in speech synthesis and
-                are triggered manually from a recognized person's result.
+                Alerts fire only when a <b>registered</b> person is recognized in
+                the camera — never for unknown visitors. Debounced to once per
+                minute per person.
               </p>
-              <button className="secondary" onClick={() => speak("friend")}>
-                <AudioLines size={16} /> Test greeting
+              <label className="toggle-row">
+                <input
+                  type="checkbox"
+                  checked={alerts.chime}
+                  onChange={(e) =>
+                    setAlerts({ ...alerts, chime: e.target.checked })
+                  }
+                />
+                <span>Play a chime sound</span>
+              </label>
+              <label className="toggle-row">
+                <input
+                  type="checkbox"
+                  checked={alerts.voice}
+                  onChange={(e) =>
+                    setAlerts({ ...alerts, voice: e.target.checked })
+                  }
+                />
+                <span>Speak a greeting (uses each person's custom message)</span>
+              </label>
+              <label className="toggle-row">
+                <input
+                  type="checkbox"
+                  checked={alerts.desktop}
+                  onChange={async (e) => {
+                    const on = e.target.checked;
+                    if (on && "Notification" in window) {
+                      const perm = await Notification.requestPermission();
+                      if (perm !== "granted") {
+                        setNotice(
+                          "Desktop notifications were blocked in the browser.",
+                        );
+                        return;
+                      }
+                    }
+                    setAlerts({ ...alerts, desktop: on });
+                  }}
+                />
+                <span>Send a desktop notification</span>
+              </label>
+              <button
+                className="secondary"
+                onClick={() => {
+                  if (alerts.chime) playChime();
+                  speak("Welcome back, friend");
+                  if (alerts.desktop)
+                    notify("FaceIQ — recognized", "Test notification.");
+                }}
+              >
+                <AudioLines size={16} /> Test alert
               </button>
             </div>
           </div>
@@ -1000,6 +1118,16 @@ function App() {
                 value={selected.interests}
                 onChange={(e) =>
                   setSelected({ ...selected, interests: e.target.value })
+                }
+              />
+            </label>
+            <label>
+              Custom spoken greeting
+              <input
+                value={selected.greeting || ""}
+                placeholder={`Default: "Welcome back, ${selected.name}"`}
+                onChange={(e) =>
+                  setSelected({ ...selected, greeting: e.target.value })
                 }
               />
             </label>

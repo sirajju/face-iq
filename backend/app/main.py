@@ -36,6 +36,7 @@ def public_person(row):
     return {
         "id": row["id"], "name": row["name"], "notes": row["notes"],
         "interests": row["interests"], "consent": bool(row["consent"]),
+        "greeting": row["greeting"] if "greeting" in row.keys() else "",
         "created_at": row["created_at"], "first_seen": row["first_seen"],
         "last_seen": row["last_seen"], "visit_count": row["visit_count"]
     }
@@ -149,12 +150,13 @@ def delete_person(person_id: int):
 class UpdateBody(BaseModel):
     notes: str = Field(default="", max_length=2000)
     interests: str = Field(default="", max_length=500)
+    greeting: str = Field(default="", max_length=200)
 
 @app.patch("/api/people/{person_id}")
 def update_person(person_id: int, body: UpdateBody):
     with connect() as con:
-        cur = con.execute("UPDATE people SET notes=?, interests=? WHERE id=?",
-                          (body.notes, body.interests, person_id))
+        cur = con.execute("UPDATE people SET notes=?, interests=?, greeting=? WHERE id=?",
+                          (body.notes, body.interests, body.greeting.strip(), person_id))
         if cur.rowcount == 0:
             raise HTTPException(404, "Person not found.")
         row = con.execute("SELECT * FROM people WHERE id=?", (person_id,)).fetchone()
@@ -224,9 +226,11 @@ async def recognize(frame: UploadFile = File(...)):
             clear_enough = False
         display = "Unknown visitor"
         person_id = None
+        greeting = None
         if person is not None:
             person_id = person["id"]
             display = person["name"]
+            greeting = (person["greeting"] if "greeting" in person.keys() else "") or None
             timestamp = now()
             with connect() as con:
                 # Debounce repeat events: one event per person per 30 seconds.
@@ -267,6 +271,8 @@ async def recognize(frame: UploadFile = File(...)):
             "facing": face["facing"], "detection_score": face["detection_score"],
             # Whether this face was clear enough to attempt identification.
             "recognizable": clear_enough,
+            # Custom spoken greeting for a recognized person (None -> default).
+            "greeting": greeting,
             # Enrollment needs a frontal, high-quality face for a good embedding.
             "enroll_ready": (face["facing"] == "Looking at camera"
                              and face["detection_score"] >= IDENTIFY_MIN_DETECTION),

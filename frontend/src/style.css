@@ -10,3 +10,7 @@
 .small-button{padding:7px 10px;font-size:11px}
 .small-button:disabled{opacity:.45;cursor:not-allowed}
 .quick-modal{max-width:440px}
+
+/* Recognition-alert toggles in settings */
+.toggle-row{display:flex;align-items:center;gap:10px;font-size:13px;color:#cdd8e6;margin:10px 0;cursor:pointer}
+.toggle-row input{width:16px;height:16px;accent-color:#5ed8a8;cursor:pointer}

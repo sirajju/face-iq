@@ -41,3 +41,7 @@ def _migrate(con):
     event_cols = {r["name"] for r in con.execute("PRAGMA table_info(events)")}
     if "facing" not in event_cols:
         con.execute("ALTER TABLE events ADD COLUMN facing TEXT NOT NULL DEFAULT 'Unknown'")
+    people_cols = {r["name"] for r in con.execute("PRAGMA table_info(people)")}
+    if "greeting" not in people_cols:
+        # Optional custom spoken greeting; empty falls back to "Welcome back, <name>".
+        con.execute("ALTER TABLE people ADD COLUMN greeting TEXT NOT NULL DEFAULT ''")
