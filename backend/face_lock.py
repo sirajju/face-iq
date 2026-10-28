@@ -8,6 +8,9 @@ SECURITY MODEL (read this):
   * This tool ONLY locks the PC (user32.LockWorkStation). It can never unlock
     it, never bypasses the Windows lock screen, and stores no Windows
     credentials. Unlocking always uses your normal Windows PIN/password.
+  * It locks sooner when a stranger lingers while the Owner is away, and when
+    the Owner returns it wakes the display and chimes (a convenience cue only -
+    waking the screen just shows the normal sign-in; it does NOT unlock).
   * An RGB webcam match is NOT a liveness/anti-spoof guarantee. Treat this as a
     convenience "walk-away lock", not a security boundary.
   * Locking is always safe and fully recoverable: if anything misbehaves you
@@ -35,9 +38,10 @@ from app.vision import Vision
 # Cosine similarity to accept a face as an Owner. Matches the frontal threshold
 # used by the API; raise for stricter, lower for more lenient.
 OWNER_MATCH_THRESHOLD = 0.42
-POLL_SECONDS = 2.0          # how often to sample the camera
-STARTUP_GRACE_SECONDS = 10  # never lock during this warm-up after launch
-POST_LOCK_COOLDOWN = 30     # after locking, pause before evaluating again
+POLL_SECONDS = 2.0           # how often to sample the camera
+STARTUP_GRACE_SECONDS = 10   # never lock during this warm-up after launch
+POST_LOCK_COOLDOWN = 30      # after locking, pause before evaluating again
+STRANGER_GRACE_SECONDS = 5   # lock faster when a non-owner is present and owner is away
 
 
 def log(msg):
@@ -76,27 +80,53 @@ def cosine(a, b):
     return float(np.dot(a, b) / ((np.linalg.norm(a) * np.linalg.norm(b)) + 1e-12))
 
 
-def owner_present(vision, frame, owners):
+def scan(vision, frame, owners):
+    """Return (owner_seen, stranger_seen) for the faces in this frame."""
     ok, buf = cv2.imencode(".jpg", frame)
     if not ok:
-        return False
+        return (False, False)
     try:
         _, faces = vision.analyze(buf.tobytes())
     except Exception:
-        return False
+        return (False, False)
+    owner_seen = stranger_seen = False
     for face in faces:
         emb = np.asarray(face["embedding"], dtype=np.float32)
         if any(cosine(emb, o) >= OWNER_MATCH_THRESHOLD for o in owners):
-            return True
-    return False
+            owner_seen = True
+        else:
+            stranger_seen = True
+    return owner_seen, stranger_seen
 
 
-def lock_workstation(dry_run):
+def lock_workstation(dry_run, reason):
     if dry_run:
-        log("WOULD LOCK (dry-run) — owner absent past grace period.")
+        log(f"WOULD LOCK (dry-run) - {reason}.")
         return
-    log("Locking workstation (owner absent).")
+    log(f"Locking workstation ({reason}).")
     ctypes.windll.user32.LockWorkStation()
+
+
+def on_owner_return(dry_run):
+    """Owner is back in view: wake the display and chime. Never unlocks Windows.
+    If the PC is locked this only lights up the normal sign-in screen."""
+    log("Welcome back, Owner." + (" (dry-run)" if dry_run else ""))
+    try:
+        # ES_CONTINUOUS | ES_DISPLAY_REQUIRED: nudge the display awake, then
+        # clear the request so we don't prevent normal sleep afterwards.
+        ES_CONTINUOUS = 0x80000000
+        ES_DISPLAY_REQUIRED = 0x00000002
+        k32 = ctypes.windll.kernel32
+        k32.SetThreadExecutionState(ES_CONTINUOUS | ES_DISPLAY_REQUIRED)
+        k32.SetThreadExecutionState(ES_CONTINUOUS)
+    except Exception:
+        pass
+    try:
+        import winsound
+        winsound.Beep(880, 150)
+        winsound.Beep(1320, 180)
+    except Exception:
+        pass
 
 
 def main():
@@ -119,6 +149,7 @@ def main():
 
     cap = None
     last_seen_owner = time.time() + STARTUP_GRACE_SECONDS  # warm-up
+    owner_was_present = True  # avoid a spurious "welcome back" on first sight
     try:
         while True:
             armed, db_grace = read_settings()
@@ -133,6 +164,7 @@ def main():
                     log("No Owner enrolled - idle. Tick an Owner in FaceIQ.")
                 time.sleep(POLL_SECONDS)
                 last_seen_owner = time.time()  # don't lock the instant we arm
+                owner_was_present = True
                 continue
 
             if cap is None:
@@ -143,6 +175,7 @@ def main():
                     time.sleep(POLL_SECONDS)
                     continue
                 last_seen_owner = time.time()  # fresh warm-up when (re)opening
+                owner_was_present = True
 
             ok, frame = cap.read()
             if not ok or frame is None:
@@ -150,11 +183,27 @@ def main():
                 time.sleep(POLL_SECONDS)
                 continue
 
-            if owner_present(vision, frame, owners):
-                last_seen_owner = time.time()
-            elif time.time() - last_seen_owner >= grace:
-                lock_workstation(args.dry_run)
-                last_seen_owner = time.time() + POST_LOCK_COOLDOWN
+            owner_seen, stranger_seen = scan(vision, frame, owners)
+            now = time.time()
+            if owner_seen:
+                if not owner_was_present:
+                    on_owner_return(args.dry_run)  # wake display + chime (no unlock)
+                owner_was_present = True
+                last_seen_owner = now
+            else:
+                owner_was_present = False
+                # A stranger lingering while the owner is away locks sooner.
+                effective_grace = (
+                    min(grace, STRANGER_GRACE_SECONDS) if stranger_seen else grace
+                )
+                if now - last_seen_owner >= effective_grace:
+                    reason = (
+                        "stranger present, owner away"
+                        if stranger_seen
+                        else "owner absent"
+                    )
+                    lock_workstation(args.dry_run, reason)
+                    last_seen_owner = now + POST_LOCK_COOLDOWN
 
             time.sleep(POLL_SECONDS)
     except KeyboardInterrupt:

@@ -41,6 +41,11 @@ walk-away lock. They do **not** provide liveness/anti-spoof assurance.
 Recognition and authentication are **separate**: a face match only ever triggers
 a **lock**. It is never treated as a Windows authentication result.
 
+**Companion behaviours:**
+- Owner absent past the grace period → **lock**.
+- A **stranger** lingering while the Owner is away → lock sooner (`STRANGER_GRACE_SECONDS`, default 5s).
+- Owner **returns** → wake the display + chime (convenience cue; **does not unlock** — if the PC is locked this just lights the normal sign-in screen). The spoken "welcome back" greeting also plays in the FaceIQ Live view.
+
 ---
 
 ## 3. Files changed / added

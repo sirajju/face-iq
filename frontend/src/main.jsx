@@ -1417,7 +1417,9 @@ function App() {
                   cd backend &amp;&amp; .venv\Scripts\python.exe face_lock.py
                 </code>
                 . Test safely first with <code>--dry-run</code> (logs instead of
-                locking).
+                locking). It also locks sooner if a stranger lingers while you're
+                away, and wakes the screen with a chime when you return (this
+                never unlocks — your Windows PIN/password still does).
               </p>
               <div className="settings-callout">
                 <AlertTriangle size={17} />
