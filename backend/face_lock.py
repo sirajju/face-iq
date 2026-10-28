@@ -193,14 +193,16 @@ def main():
 
             ok, frame = cap.read()
             if not ok or frame is None:
-                # Opened but no frames: camera busy (another app holds it) OR the
-                # PC is locked. Warn clearly, and periodically reopen to recover.
+                # Opened but no frames: camera busy (another app holds it), the PC
+                # is locked, or the device was unplugged. We cannot identify anyone,
+                # so DO NOT lock — and reset the absence timer so we don't lock the
+                # instant frames come back.
                 read_fail += 1
+                last_seen_owner = time.time()
                 if read_fail == 3 or read_fail % 15 == 0:
-                    log("Camera opened but returns no frames - it's likely in use "
-                        "by another app (the FaceIQ Live view, Zoom, Teams, the "
-                        "Camera app), or the PC is locked. Close the other app so "
-                        "auto-lock can access the webcam.")
+                    log("Camera returns no frames - can't identify, so NOT locking. "
+                        "It's likely in use by another app (FaceIQ Live view, Zoom, "
+                        "Teams, Camera), the PC is locked, or the webcam was unplugged.")
                 if read_fail % 15 == 0:
                     cap.release()
                     cap = None

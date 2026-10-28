@@ -1,0 +1,17 @@
+Windows Registry Editor Version 5.00
+
+; Manual registration alternative to `regsvr32 FaceIQCredentialProvider.dll`.
+; EDIT the DLL path below to the ABSOLUTE path of your built DLL (escape every
+; backslash as \\). The GUID must match CLSID_FaceIQProvider in common.h.
+;
+; To UNINSTALL, delete these two keys (see windows/README.md Rollback).
+
+[HKEY_CLASSES_ROOT\CLSID\{7F3B9E42-1C6A-4D2E-9B51-6F2A1E9D4C80}]
+@="FaceIQ Credential Provider"
+
+[HKEY_CLASSES_ROOT\CLSID\{7F3B9E42-1C6A-4D2E-9B51-6F2A1E9D4C80}\InprocServer32]
+@="C:\\FaceIQ\\FaceIQCredentialProvider.dll"
+"ThreadingModel"="Apartment"
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers\{7F3B9E42-1C6A-4D2E-9B51-6F2A1E9D4C80}]
+@="FaceIQ Credential Provider"

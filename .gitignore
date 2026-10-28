@@ -3,6 +3,8 @@ node_modules
 __pycache__
 models
 media
+build
+*.dll
 *.sqlite*
 .env
 *.env

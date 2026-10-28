@@ -81,6 +81,7 @@ function App() {
   const lockingRef = useRef(false); // guard against duplicate lock calls
   const [lockCountdown, setLockCountdown] = useState(null);
   const [welcomeBanner, setWelcomeBanner] = useState(null);
+  const [streamLost, setStreamLost] = useState(false);
   const [captures, setCaptures] = useState([]);
   const [captureNames, setCaptureNames] = useState({});
   const [ownerStatus, setOwnerStatus] = useState({
@@ -154,16 +155,40 @@ function App() {
       ownerIds: new Set(people.filter((p) => p.is_owner).map((p) => p.id)),
     };
   }, [people, ownerStatus]);
+  // True only when the webcam is genuinely delivering frames. A disconnected,
+  // ended, muted or not-yet-ready track means we cannot identify anyone.
+  const cameraStreaming = () => {
+    const s = streamRef.current,
+      v = videoRef.current;
+    if (!s || !v) return false;
+    const track = s.getVideoTracks()[0];
+    if (!track) return false;
+    if (track.readyState !== "live") return false; // "ended" = disconnected
+    if (track.muted) return false; // source temporarily producing no frames
+    if (v.readyState < 2) return false; // < HAVE_CURRENT_DATA
+    return true;
+  };
   // Auto-lock timer: while the camera is on, count down whenever no Owner is in
   // view, and ask the backend to LOCK (never unlock) when it reaches zero.
   useEffect(() => {
     if (!cameraOn) {
       setLockCountdown(null);
+      setStreamLost(false);
       return;
     }
     const id = setInterval(() => {
+      const streaming = cameraStreaming();
+      setStreamLost(!streaming);
       const cfg = ownerCfgRef.current;
       if (!cfg.armed || cfg.ownerIds.size === 0) {
+        setLockCountdown(null);
+        return;
+      }
+      // If the camera isn't actually delivering frames (disconnected, covered,
+      // frozen), we can't tell if the Owner is there — never lock, and reset the
+      // absence timer so it doesn't fire the instant the camera comes back.
+      if (!streaming) {
+        ownerLastSeenRef.current = Date.now();
         setLockCountdown(null);
         return;
       }
@@ -239,7 +264,8 @@ function App() {
       busyRef.current ||
       !videoRef.current ||
       !videoRef.current.videoWidth ||
-      !canvasRef.current
+      !canvasRef.current ||
+      !cameraStreaming() // skip stale/frozen frames; can't identify anyone
     )
       return;
     busyRef.current = true;
@@ -944,6 +970,12 @@ function App() {
                 {cameraOn && welcomeBanner && (
                   <div className="welcome-banner">
                     <Check size={18} /> Welcome back, {welcomeBanner}
+                  </div>
+                )}
+                {cameraOn && streamLost && (
+                  <div className="stream-lost-banner">
+                    <AlertTriangle size={16} /> Camera not streaming —
+                    recognition &amp; auto-lock paused
                   </div>
                 )}
               </div>
