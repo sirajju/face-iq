@@ -1,0 +1,43 @@
+import sqlite3
+from pathlib import Path
+
+DB_PATH = Path(__file__).resolve().parents[1] / "faceiq.sqlite3"
+
+def connect():
+    con = sqlite3.connect(DB_PATH)
+    con.row_factory = sqlite3.Row
+    con.execute("PRAGMA foreign_keys = ON")
+    return con
+
+def init_db():
+    with connect() as con:
+        con.executescript('''
+        CREATE TABLE IF NOT EXISTS people (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            notes TEXT NOT NULL DEFAULT '',
+            interests TEXT NOT NULL DEFAULT '',
+            consent INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            first_seen TEXT,
+            last_seen TEXT,
+            visit_count INTEGER NOT NULL DEFAULT 0,
+            embedding BLOB NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            person_id INTEGER,
+            display_name TEXT NOT NULL,
+            seen_at TEXT NOT NULL,
+            expression TEXT NOT NULL DEFAULT 'Unknown',
+            confidence REAL,
+            FOREIGN KEY(person_id) REFERENCES people(id) ON DELETE SET NULL
+        );
+        ''')
+        _migrate(con)
+
+def _migrate(con):
+    # Add columns introduced after the first release, ignoring "already exists".
+    event_cols = {r["name"] for r in con.execute("PRAGMA table_info(events)")}
+    if "facing" not in event_cols:
+        con.execute("ALTER TABLE events ADD COLUMN facing TEXT NOT NULL DEFAULT 'Unknown'")
