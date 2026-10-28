@@ -41,6 +41,12 @@ def init_db():
             resolved INTEGER NOT NULL DEFAULT 0,
             person_id INTEGER
         );
+        -- Local app settings: Owner PIN hash and auto-lock config. Never stores
+        -- Windows credentials; the Owner PIN is a FaceIQ-only app secret.
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
         ''')
         _migrate(con)
 
@@ -56,3 +62,6 @@ def _migrate(con):
     if "greeting_audio" not in people_cols:
         # Filename of an uploaded greeting clip (in media/greetings); empty = use TTS.
         con.execute("ALTER TABLE people ADD COLUMN greeting_audio TEXT NOT NULL DEFAULT ''")
+    if "is_owner" not in people_cols:
+        # Marks a registered person as an Owner for the auto-lock companion.
+        con.execute("ALTER TABLE people ADD COLUMN is_owner INTEGER NOT NULL DEFAULT 0")

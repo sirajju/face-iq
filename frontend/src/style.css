@@ -30,3 +30,12 @@
 .capture-card input{width:100%}
 .capture-actions{display:flex;gap:8px;align-items:center}
 .capture-actions .primary{flex:1}
+
+/* Owner / face auto-lock */
+.owner-badge{margin-left:8px;font-size:9px;font-weight:700;letter-spacing:.5px;color:#071811;background:#5ed8a8;padding:2px 7px;border-radius:5px;vertical-align:middle}
+.owner-check span b{color:#e8eef6}
+.autolock-row{display:flex;align-items:center;gap:10px;margin:10px 0;font-size:12px;color:#9fb0c2;flex-wrap:wrap}
+.autolock-row>span:first-child{min-width:78px;color:#7e8fa3}
+.autolock-row>b{color:#e8eef6;flex:1}
+.autolock-row>b.armed{color:#5ed8a8}
+.autolock-row button{margin-left:auto}

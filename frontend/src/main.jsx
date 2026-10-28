@@ -75,6 +75,12 @@ function App() {
   const tracksRef = useRef([]); // unknown-face tracklets for the grace window
   const [captures, setCaptures] = useState([]);
   const [captureNames, setCaptureNames] = useState({});
+  const [ownerStatus, setOwnerStatus] = useState({
+    pin_set: false,
+    owners: [],
+    auto_lock_armed: false,
+    auto_lock_grace: 20,
+  });
   const [form, setForm] = useState({
     name: "",
     notes: "",
@@ -107,18 +113,20 @@ function App() {
 
   const refresh = useCallback(async () => {
     try {
-      const [p, e, s, h, c] = await Promise.all([
+      const [p, e, s, h, c, o] = await Promise.all([
         request("/people"),
         request("/events?limit=100"),
         request("/stats"),
         request("/health"),
         request("/unknown-captures"),
+        request("/owner/status"),
       ]);
       setPeople(p);
       setEvents(e);
       setStats(s);
       setHealth(h);
       setCaptures(c);
+      setOwnerStatus(o);
     } catch (e) {
       setHealth({ ok: false, vision_ready: false, message: e.message });
     }
@@ -313,6 +321,99 @@ function App() {
       setNotice(e.message);
     } finally {
       setQuickSaving(false);
+    }
+  };
+  // Owner PIN helper. The Owner PIN is a FaceIQ app secret (NOT your Windows
+  // password) — it only gates owner actions and the auto-lock companion.
+  const ensureOwnerPin = async () => {
+    if (!ownerStatus.pin_set) {
+      const p1 = window.prompt(
+        "Create an Owner PIN (4–32 chars).\nThis is a FaceIQ app PIN, NOT your Windows password.",
+      );
+      if (!p1) return null;
+      const p2 = window.prompt("Re-enter the Owner PIN to confirm.");
+      if (p1 !== p2) {
+        setNotice("PINs did not match.");
+        return null;
+      }
+      try {
+        await request("/owner/pin", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ pin: p1 }),
+        });
+      } catch (e) {
+        setNotice(e.message);
+        return null;
+      }
+      await refresh();
+      return p1;
+    }
+    return window.prompt("Enter Owner PIN.") || null;
+  };
+  const toggleOwner = async (person, makeOwner) => {
+    const pin = await ensureOwnerPin();
+    if (!pin) return;
+    try {
+      const updated = await request(`/people/${person.id}/owner`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ is_owner: makeOwner, pin }),
+      });
+      if (selected && selected.id === person.id)
+        setSelected({ ...selected, is_owner: updated.is_owner });
+      setNotice(
+        updated.is_owner
+          ? `${updated.name} is now an Owner.`
+          : `${updated.name} is no longer an Owner.`,
+      );
+      refresh();
+    } catch (e) {
+      setNotice(e.message);
+    }
+  };
+  const changeOwnerPin = async () => {
+    if (!ownerStatus.pin_set) {
+      await ensureOwnerPin();
+      return;
+    }
+    const current = window.prompt("Enter current Owner PIN.");
+    if (!current) return;
+    const next = window.prompt("Enter a new Owner PIN (4–32 chars).");
+    if (!next) return;
+    try {
+      await request("/owner/pin", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pin: next, current_pin: current }),
+      });
+      setNotice("Owner PIN updated.");
+      refresh();
+    } catch (e) {
+      setNotice(e.message);
+    }
+  };
+  const applyAutoLock = async (armed, grace) => {
+    if (!ownerStatus.owners.length) {
+      setNotice("Tick at least one Owner before arming auto-lock.");
+      return;
+    }
+    const pin = await ensureOwnerPin();
+    if (!pin) return;
+    try {
+      await request("/owner/auto-lock", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          armed,
+          grace_seconds: grace ?? ownerStatus.auto_lock_grace,
+          pin,
+        }),
+      });
+      setNotice(armed ? "Auto-lock armed." : "Auto-lock disarmed.");
+      refresh();
+    } catch (e) {
+      setNotice(e.message);
     }
   };
   const identifyCapture = async (cid) => {
@@ -966,7 +1067,10 @@ function App() {
                         <ShieldCheck size={13} /> Consent recorded
                       </span>
                     </div>
-                    <h3>{p.name}</h3>
+                    <h3>
+                      {p.name}
+                      {p.is_owner && <span className="owner-badge">OWNER</span>}
+                    </h3>
                     <p className="profile-interests">
                       {p.interests || "No interests added"}
                     </p>
@@ -1250,6 +1354,80 @@ function App() {
                 <AudioLines size={16} /> Test alert
               </button>
             </div>
+            <div className="panel settings-card">
+              <div className="settings-icon">
+                <ShieldCheck />
+              </div>
+              <h2>Face auto-lock (Owner)</h2>
+              <p>
+                A companion app <b>locks</b> this PC when the Owner's face is
+                absent. It never unlocks and stores no Windows credentials —
+                unlocking always uses your normal Windows PIN/password.
+              </p>
+              <div className="autolock-row">
+                <span>Owner PIN</span>
+                <b>{ownerStatus.pin_set ? "Set" : "Not set"}</b>
+                <button className="secondary small-button" onClick={changeOwnerPin}>
+                  {ownerStatus.pin_set ? "Change PIN" : "Set PIN"}
+                </button>
+              </div>
+              <div className="autolock-row">
+                <span>Owners</span>
+                <b>
+                  {ownerStatus.owners.length
+                    ? ownerStatus.owners.map((o) => o.name).join(", ")
+                    : "None — tick Owner on a profile"}
+                </b>
+              </div>
+              <label>
+                Lock after the Owner is absent for (seconds)
+                <input
+                  type="number"
+                  min={5}
+                  max={600}
+                  value={ownerStatus.auto_lock_grace}
+                  onChange={(e) =>
+                    setOwnerStatus({
+                      ...ownerStatus,
+                      auto_lock_grace: Number(e.target.value) || 20,
+                    })
+                  }
+                />
+              </label>
+              <div className="autolock-row">
+                <span>Status</span>
+                <b className={ownerStatus.auto_lock_armed ? "armed" : ""}>
+                  {ownerStatus.auto_lock_armed ? "ARMED" : "Disarmed"}
+                </b>
+                <button
+                  className={ownerStatus.auto_lock_armed ? "secondary" : "primary"}
+                  onClick={() =>
+                    applyAutoLock(
+                      !ownerStatus.auto_lock_armed,
+                      ownerStatus.auto_lock_grace,
+                    )
+                  }
+                >
+                  {ownerStatus.auto_lock_armed ? "Disarm" : "Arm auto-lock"}
+                </button>
+              </div>
+              <p className="small-hint">
+                Run the companion in your session:{" "}
+                <code>
+                  cd backend &amp;&amp; .venv\Scripts\python.exe face_lock.py
+                </code>
+                . Test safely first with <code>--dry-run</code> (logs instead of
+                locking).
+              </p>
+              <div className="settings-callout">
+                <AlertTriangle size={17} />
+                <span>
+                  An RGB webcam match is not spoof-proof (a photo can fool it).
+                  Use this as a convenience walk-away lock, not a security
+                  boundary.
+                </span>
+              </div>
+            </div>
           </div>
         )}
       </main>
@@ -1360,6 +1538,18 @@ function App() {
                   setSelected({ ...selected, name: e.target.value })
                 }
               />
+            </label>
+            <label className="consent-check owner-check">
+              <input
+                type="checkbox"
+                checked={!!selected.is_owner}
+                onChange={(e) => toggleOwner(selected, e.target.checked)}
+              />
+              <span>
+                <b>Owner</b> — used by the face auto-lock companion. Changing this
+                asks for the Owner PIN (a FaceIQ app PIN, not your Windows
+                password).
+              </span>
             </label>
             <label>
               Interests & preferences

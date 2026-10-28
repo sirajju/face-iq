@@ -2,6 +2,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 import json
 import uuid
+import hashlib
+import hmac
+import secrets
 import numpy as np
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -52,6 +55,7 @@ def public_person(row):
         "interests": row["interests"], "consent": bool(row["consent"]),
         "greeting": row["greeting"] if "greeting" in row.keys() else "",
         "has_greeting_audio": bool(row["greeting_audio"]) if "greeting_audio" in row.keys() else False,
+        "is_owner": bool(row["is_owner"]) if "is_owner" in row.keys() else False,
         "created_at": row["created_at"], "first_seen": row["first_seen"],
         "last_seen": row["last_seen"], "visit_count": row["visit_count"]
     }
@@ -63,6 +67,35 @@ def cosine(a, b):
     if a.size != b.size:
         return -1.0
     return float(np.dot(a, b) / ((np.linalg.norm(a) * np.linalg.norm(b)) + 1e-12))
+
+# --- Owner PIN & app settings --------------------------------------------
+# The Owner PIN is a FaceIQ-only app secret used to gate owner actions and the
+# auto-lock companion. It is hashed (PBKDF2) and is NEVER a Windows credential.
+PIN_ITERATIONS = 200_000
+
+def get_setting(con, key, default=None):
+    row = con.execute("SELECT value FROM app_settings WHERE key=?", (key,)).fetchone()
+    return row["value"] if row else default
+
+def set_setting(con, key, value):
+    con.execute(
+        "INSERT INTO app_settings(key,value) VALUES(?,?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (key, str(value)),
+    )
+
+def hash_pin(pin, salt):
+    return hashlib.pbkdf2_hmac("sha256", pin.encode("utf-8"), salt, PIN_ITERATIONS).hex()
+
+def owner_pin_is_set(con):
+    return get_setting(con, "owner_pin_hash") is not None
+
+def verify_owner_pin(con, pin):
+    stored = get_setting(con, "owner_pin_hash")
+    salt_hex = get_setting(con, "owner_pin_salt")
+    if not stored or not salt_hex:
+        return False
+    return hmac.compare_digest(hash_pin(pin, bytes.fromhex(salt_hex)), stored)
 
 def person_from_embeddings(con, name, embeddings, notes):
     """Create a consenting person from one or more embeddings; returns the row."""
@@ -330,6 +363,75 @@ def dismiss_unknown_capture(capture_id: int):
         _remove_unknown_file(row["image"])
         con.execute("DELETE FROM unknown_captures WHERE id=?", (capture_id,))
     return {"ok": True}
+
+class SetPinBody(BaseModel):
+    pin: str = Field(min_length=4, max_length=32)
+    current_pin: str | None = None
+
+class VerifyPinBody(BaseModel):
+    pin: str = Field(min_length=1, max_length=32)
+
+class OwnerFlagBody(BaseModel):
+    is_owner: bool
+    pin: str = Field(min_length=1, max_length=32)
+
+class AutoLockBody(BaseModel):
+    armed: bool
+    grace_seconds: int = Field(default=20, ge=5, le=600)
+    pin: str = Field(min_length=1, max_length=32)
+
+@app.get("/api/owner/status")
+def owner_status():
+    with connect() as con:
+        pin_set = owner_pin_is_set(con)
+        owners = con.execute("SELECT id, name FROM people WHERE is_owner=1").fetchall()
+        armed = get_setting(con, "auto_lock_armed", "0") == "1"
+        grace = int(get_setting(con, "auto_lock_grace", "20") or 20)
+    return {"pin_set": pin_set, "owners": [dict(o) for o in owners],
+            "auto_lock_armed": armed, "auto_lock_grace": grace}
+
+@app.post("/api/owner/pin")
+def set_owner_pin(body: SetPinBody):
+    with connect() as con:
+        if owner_pin_is_set(con):
+            # Changing an existing PIN requires the current one.
+            if not body.current_pin or not verify_owner_pin(con, body.current_pin):
+                raise HTTPException(403, "Current Owner PIN is incorrect.")
+        salt = secrets.token_bytes(16)
+        set_setting(con, "owner_pin_salt", salt.hex())
+        set_setting(con, "owner_pin_hash", hash_pin(body.pin, salt))
+    return {"ok": True, "pin_set": True}
+
+@app.post("/api/owner/verify")
+def verify_pin(body: VerifyPinBody):
+    with connect() as con:
+        if not verify_owner_pin(con, body.pin):
+            raise HTTPException(403, "Incorrect Owner PIN.")
+    return {"ok": True}
+
+@app.post("/api/people/{person_id}/owner")
+def set_person_owner(person_id: int, body: OwnerFlagBody):
+    with connect() as con:
+        if not owner_pin_is_set(con):
+            raise HTTPException(400, "Set an Owner PIN before assigning owners.")
+        if not verify_owner_pin(con, body.pin):
+            raise HTTPException(403, "Incorrect Owner PIN.")
+        row = con.execute("SELECT id FROM people WHERE id=?", (person_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "Person not found.")
+        con.execute("UPDATE people SET is_owner=? WHERE id=?",
+                    (1 if body.is_owner else 0, person_id))
+        updated = con.execute("SELECT * FROM people WHERE id=?", (person_id,)).fetchone()
+    return public_person(updated)
+
+@app.post("/api/owner/auto-lock")
+def set_auto_lock(body: AutoLockBody):
+    with connect() as con:
+        if not verify_owner_pin(con, body.pin):
+            raise HTTPException(403, "Incorrect Owner PIN.")
+        set_setting(con, "auto_lock_armed", "1" if body.armed else "0")
+        set_setting(con, "auto_lock_grace", str(body.grace_seconds))
+    return {"ok": True, "auto_lock_armed": body.armed, "auto_lock_grace": body.grace_seconds}
 
 @app.get("/api/events")
 def events(limit: int = 100):
