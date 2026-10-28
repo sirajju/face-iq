@@ -1039,7 +1039,7 @@ function App() {
                     <div className="panel capture-card" key={c.id}>
                       <img
                         className="capture-img"
-                        src={`${API}${c.image_url}`}
+                        src={`${API}/unknown-captures/${c.id}/image`}
                         alt="Unknown visitor snapshot"
                       />
                       <span className="capture-time">
