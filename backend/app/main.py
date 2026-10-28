@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from pathlib import Path
 import json
+import time
 import uuid
 import hashlib
 import hmac
@@ -45,6 +46,12 @@ SIDE_MATCH_THRESHOLD = 0.50
 # away faces are still tracked (boxed/logged) but never identified.
 IDENTIFY_MIN_DETECTION = 0.90
 SIDE_MIN_DETECTION = 0.80
+
+# Live presence derived from the browser's /recognize stream, so the face agent
+# can share ONE camera (the browser's) instead of opening its own. Monotonic.
+_presence = {"last_frame": 0.0, "last_owner": 0.0}
+PRESENCE_FRAME_STALE = 3.0   # no browser frame within this -> camera considered down
+PRESENCE_OWNER_FRESH = 4.0   # owner seen within this -> "present"
 
 def now():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -424,6 +431,19 @@ def set_person_owner(person_id: int, body: OwnerFlagBody):
         updated = con.execute("SELECT * FROM people WHERE id=?", (person_id,)).fetchone()
     return public_person(updated)
 
+@app.get("/api/owner/presence")
+def owner_presence():
+    """Live owner presence computed from the browser's recognition stream, so the
+    face agent can share the browser's camera. OK = owner in view, DENY = camera
+    working but owner not seen, NOCAM = no recent frames (browser camera off)."""
+    now = time.monotonic()
+    frame_fresh = (now - _presence["last_frame"]) <= PRESENCE_FRAME_STALE
+    owner_fresh = (now - _presence["last_owner"]) <= PRESENCE_OWNER_FRESH
+    status = "NOCAM" if not frame_fresh else ("OK" if owner_fresh else "DENY")
+    return {"status": status, "frame_fresh": frame_fresh, "owner_fresh": owner_fresh,
+            "frame_age": round(now - _presence["last_frame"], 1),
+            "owner_age": round(now - _presence["last_owner"], 1)}
+
 @app.post("/api/lock")
 def lock_now():
     """Lock the Windows workstation. Called by the frontend auto-lock timer when
@@ -495,6 +515,8 @@ async def recognize(frame: UploadFile = File(...)):
         _, faces = vision.analyze(raw)
     except ValueError as exc:
         raise HTTPException(400, str(exc))
+    # Browser delivered a frame -> camera is live (shared with the face agent).
+    _presence["last_frame"] = time.monotonic()
     output = []
     for face in faces:
         embedding = np.asarray(face["embedding"], dtype=np.float32)
@@ -522,6 +544,8 @@ async def recognize(frame: UploadFile = File(...)):
             display = person["name"]
             greeting = (person["greeting"] if "greeting" in person.keys() else "") or None
             has_audio = bool(person["greeting_audio"]) if "greeting_audio" in person.keys() else False
+            if "is_owner" in person.keys() and person["is_owner"]:
+                _presence["last_owner"] = time.monotonic()  # owner seen (for agent)
             timestamp = now()
             with connect() as con:
                 # Debounce repeat events: one event per person per 30 seconds.

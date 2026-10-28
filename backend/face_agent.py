@@ -17,11 +17,14 @@ Requires pywin32:  .venv\\Scripts\\python.exe -m pip install pywin32
 Run (in your user session):  .venv\\Scripts\\python.exe face_agent.py
 Stop with Ctrl+C.
 """
+import argparse
 import hashlib
 import hmac
+import json
 import os
 import threading
 import time
+import urllib.request
 from pathlib import Path
 
 # Quiet OpenCV's VIDEOIO/DSHOW warnings when the camera is busy or absent. Must
@@ -46,6 +49,9 @@ from app.vision import Vision
 
 PIPE_NAME = r"\\.\pipe\faceiq_verify"
 KEY_PATH = Path(r"C:\ProgramData\FaceIQ\ipc.key")
+# Shared mode (default): presence comes from the browser's recognition stream via
+# the backend, so ONE camera (the browser's) serves the web app AND the agent.
+BACKEND_PRESENCE_URL = "http://127.0.0.1:8000/api/owner/presence"
 OWNER_MATCH_THRESHOLD = 0.42
 OWNER_FRESH_SECONDS = 3.0   # treat Owner as "present" if seen within this window
 FRAME_STALE_SECONDS = 3.0   # no frame within this long -> camera considered down
@@ -184,7 +190,17 @@ def sign(key, status, nonce, ts):
     return hmac.new(key, msg, hashlib.sha256).hexdigest()
 
 
-def handle_client(pipe, key, worker):
+def backend_status():
+    """Shared mode: read owner presence from the backend (fed by the browser).
+    Any failure -> NOCAM so the provider fails safe."""
+    try:
+        with urllib.request.urlopen(BACKEND_PRESENCE_URL, timeout=2) as r:
+            return json.loads(r.read().decode()).get("status", "NOCAM")
+    except Exception:
+        return "NOCAM"
+
+
+def handle_client(pipe, key, get_status):
     try:
         _, data = win32file.ReadFile(pipe, 256)
         text = data.decode(errors="ignore").strip()
@@ -192,7 +208,7 @@ def handle_client(pipe, key, worker):
         if len(parts) != 2 or parts[0] != "VERIFY":
             return
         nonce = parts[1][:64]
-        status = worker.status()
+        status = get_status()
         ts = int(time.time())
         resp = f"{status} {nonce} {ts} {sign(key, status, nonce, ts)}\n"
         win32file.WriteFile(pipe, resp.encode())
@@ -220,7 +236,7 @@ def make_pipe():
     )
 
 
-def pipe_server(key, worker, stop):
+def pipe_server(key, get_status, stop):
     # Runs in a daemon thread. The blocking ConnectNamedPipe can't be interrupted
     # by Ctrl+C, so we keep it OFF the main thread; the process exit tears it down.
     while not stop.is_set():
@@ -231,7 +247,7 @@ def pipe_server(key, worker, stop):
             continue
         try:
             win32pipe.ConnectNamedPipe(pipe, None)
-            handle_client(pipe, key, worker)
+            handle_client(pipe, key, get_status)
         except pywintypes.error:
             pass
         finally:
@@ -242,31 +258,53 @@ def pipe_server(key, worker, stop):
 
 
 def main():
+    ap = argparse.ArgumentParser(description="FaceIQ face agent (pipe verifier).")
+    ap.add_argument("--direct", action="store_true",
+                    help="open the webcam directly instead of sharing the browser's "
+                         "stream via the backend (can't run alongside the Live view)")
+    ap.add_argument("--camera", type=int, default=0, help="camera index for --direct")
+    args = ap.parse_args()
+
     log("FaceIQ face agent starting. It only REPORTS a face result; it never signs you in.")
     key = load_key()
-    try:
-        vision = Vision()
-    except Exception as exc:
-        log(f"ERROR: vision models not ready ({exc}).")
-        return 1
-    worker = CameraWorker(vision)
-    worker.start()
+    worker = None
     stop = threading.Event()
-    server = threading.Thread(target=pipe_server, args=(key, worker, stop), daemon=True)
+
+    if args.direct:
+        try:
+            vision = Vision()
+        except Exception as exc:
+            log(f"ERROR: vision models not ready ({exc}).")
+            return 1
+        worker = CameraWorker(vision, args.camera)
+        worker.start()
+        get_status = worker.status
+        log("Mode: DIRECT (agent owns the webcam; stop the browser Live camera first).")
+    else:
+        get_status = backend_status
+        log("Mode: SHARED (presence from the backend's recognition stream - the ONE "
+            "browser camera serves the web app AND this agent).")
+        log(f"Reading presence from {BACKEND_PRESENCE_URL}")
+
+    server = threading.Thread(target=pipe_server, args=(key, get_status, stop), daemon=True)
     server.start()
     log("Serving named pipe. Press Ctrl+C to stop.")
     try:
-        # Interruptible wait on the main thread so Ctrl+C stops the agent cleanly.
+        last_log = 0.0
         while True:
             time.sleep(0.5)
+            if time.time() - last_log >= 5.0:
+                last_log = time.time()
+                log(f"status={get_status()}")
     except KeyboardInterrupt:
         log("Stopping…")
     finally:
         stop.set()
-        worker.stop_flag = True
-        # Wait for the worker to exit its loop and release the webcam.
-        worker.join(timeout=4)
-        log("Camera released. Bye.")
+        if worker is not None:
+            worker.stop_flag = True
+            worker.join(timeout=4)
+            log("Camera released.")
+        log("Bye.")
     return 0
 
 
