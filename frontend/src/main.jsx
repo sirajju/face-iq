@@ -18,6 +18,7 @@ import {
   Settings2,
   ShieldCheck,
   Trash2,
+  Upload,
   Users,
   Video,
   VideoOff,
@@ -333,6 +334,35 @@ function App() {
       setNotice(e.message);
     }
   };
+  const uploadGreetingAudio = async (file) => {
+    if (!selected || !file) return;
+    const fd = new FormData();
+    fd.append("clip", file, file.name);
+    try {
+      const updated = await request(`/people/${selected.id}/greeting-audio`, {
+        method: "POST",
+        body: fd,
+      });
+      setSelected({ ...selected, has_greeting_audio: updated.has_greeting_audio });
+      setNotice("Greeting audio uploaded.");
+      refresh();
+    } catch (e) {
+      setNotice(e.message);
+    }
+  };
+  const removeGreetingAudio = async () => {
+    if (!selected) return;
+    try {
+      const updated = await request(`/people/${selected.id}/greeting-audio`, {
+        method: "DELETE",
+      });
+      setSelected({ ...selected, has_greeting_audio: updated.has_greeting_audio });
+      setNotice("Greeting audio removed.");
+      refresh();
+    } catch (e) {
+      setNotice(e.message);
+    }
+  };
   const speak = (text) => {
     if ("speechSynthesis" in window) {
       window.speechSynthesis.cancel();
@@ -372,6 +402,13 @@ function App() {
         new Notification(title, { body, silent: true });
     } catch {}
   };
+  // Play a person's uploaded greeting clip (cache-busted so updates play fresh).
+  const playGreetingAudio = (id) => {
+    try {
+      const a = new Audio(`${API}/people/${id}/greeting-audio?t=${Date.now()}`);
+      a.play().catch(() => {});
+    } catch {}
+  };
   // Fire alerts for a recognized person, debounced to once per 60s per person.
   const alertRecognized = (face) => {
     if (!face.known || face.person_id == null) return;
@@ -380,7 +417,11 @@ function App() {
     if (now - last < 60000) return;
     greetedRef.current[face.person_id] = now;
     if (alerts.chime) playChime();
-    if (alerts.voice) speak(face.greeting || `Welcome back, ${face.name}`);
+    if (alerts.voice) {
+      // Prefer an uploaded voice clip; fall back to text-to-speech.
+      if (face.has_greeting_audio) playGreetingAudio(face.person_id);
+      else speak(face.greeting || `Welcome back, ${face.name}`);
+    }
     if (alerts.desktop)
       notify("FaceIQ — recognized", `${face.name} is in view.`);
   };
@@ -1131,6 +1172,49 @@ function App() {
                 }
               />
             </label>
+            <div className="audio-greeting">
+              <div>
+                <b>Greeting voice clip</b>
+                <span>
+                  {selected.has_greeting_audio
+                    ? "Custom clip uploaded — plays instead of text-to-speech."
+                    : "No clip. The spoken greeting above (text-to-speech) is used."}
+                </span>
+              </div>
+              <div className="audio-actions">
+                <label className="secondary file-btn">
+                  <Upload size={15} />{" "}
+                  {selected.has_greeting_audio ? "Replace" : "Upload"}
+                  <input
+                    type="file"
+                    accept="audio/*"
+                    hidden
+                    onChange={(e) => {
+                      const f = e.target.files && e.target.files[0];
+                      if (f) uploadGreetingAudio(f);
+                      e.target.value = "";
+                    }}
+                  />
+                </label>
+                {selected.has_greeting_audio && (
+                  <button
+                    className="secondary"
+                    onClick={() => playGreetingAudio(selected.id)}
+                  >
+                    <AudioLines size={15} /> Play
+                  </button>
+                )}
+                {selected.has_greeting_audio && (
+                  <button
+                    className="danger-icon"
+                    title="Remove audio clip"
+                    onClick={removeGreetingAudio}
+                  >
+                    <Trash2 size={15} />
+                  </button>
+                )}
+              </div>
+            </div>
             <label>
               Personal notes
               <textarea

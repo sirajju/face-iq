@@ -4,9 +4,18 @@ import json
 import numpy as np
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from .db import connect, init_db
 from .vision import Vision
+
+# Uploaded per-person greeting clips live on disk, referenced by filename in DB.
+GREETING_DIR = Path(__file__).resolve().parents[1] / "media" / "greetings"
+GREETING_DIR.mkdir(parents=True, exist_ok=True)
+# Allowed upload types -> file extension used on disk.
+AUDIO_EXTS = {"audio/mpeg": ".mp3", "audio/mp3": ".mp3", "audio/wav": ".wav",
+              "audio/x-wav": ".wav", "audio/webm": ".webm", "audio/ogg": ".ogg",
+              "audio/mp4": ".m4a", "audio/aac": ".aac"}
 
 app = FastAPI(title="FaceIQ API", version="1.0.0")
 app.add_middleware(
@@ -37,6 +46,7 @@ def public_person(row):
         "id": row["id"], "name": row["name"], "notes": row["notes"],
         "interests": row["interests"], "consent": bool(row["consent"]),
         "greeting": row["greeting"] if "greeting" in row.keys() else "",
+        "has_greeting_audio": bool(row["greeting_audio"]) if "greeting_audio" in row.keys() else False,
         "created_at": row["created_at"], "first_seen": row["first_seen"],
         "last_seen": row["last_seen"], "visit_count": row["visit_count"]
     }
@@ -141,9 +151,10 @@ def quick_enroll(body: QuickEnrollBody):
 @app.delete("/api/people/{person_id}")
 def delete_person(person_id: int):
     with connect() as con:
-        row = con.execute("SELECT id FROM people WHERE id=?", (person_id,)).fetchone()
+        row = con.execute("SELECT greeting_audio FROM people WHERE id=?", (person_id,)).fetchone()
         if not row:
             raise HTTPException(404, "Person not found.")
+        _remove_greeting_file(row["greeting_audio"])
         con.execute("DELETE FROM people WHERE id=?", (person_id,))
     return {"ok": True}
 
@@ -161,6 +172,56 @@ def update_person(person_id: int, body: UpdateBody):
             raise HTTPException(404, "Person not found.")
         row = con.execute("SELECT * FROM people WHERE id=?", (person_id,)).fetchone()
     return public_person(row)
+
+def _remove_greeting_file(stored):
+    if stored:
+        try:
+            (GREETING_DIR / stored).unlink(missing_ok=True)
+        except Exception:
+            pass
+
+@app.post("/api/people/{person_id}/greeting-audio")
+async def upload_greeting_audio(person_id: int, clip: UploadFile = File(...)):
+    ext = AUDIO_EXTS.get((clip.content_type or "").lower())
+    if not ext:
+        raise HTTPException(400, "Unsupported audio type. Use mp3, wav, ogg, webm, m4a or aac.")
+    raw = await clip.read()
+    if not raw:
+        raise HTTPException(400, "Empty audio file.")
+    if len(raw) > 5_000_000:
+        raise HTTPException(413, "Audio too large (max 5 MB).")
+    with connect() as con:
+        row = con.execute("SELECT greeting_audio FROM people WHERE id=?", (person_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "Person not found.")
+        _remove_greeting_file(row["greeting_audio"])  # replace any previous clip
+        filename = f"person_{person_id}{ext}"
+        (GREETING_DIR / filename).write_bytes(raw)
+        con.execute("UPDATE people SET greeting_audio=? WHERE id=?", (filename, person_id))
+        updated = con.execute("SELECT * FROM people WHERE id=?", (person_id,)).fetchone()
+    return public_person(updated)
+
+@app.get("/api/people/{person_id}/greeting-audio")
+def get_greeting_audio(person_id: int):
+    with connect() as con:
+        row = con.execute("SELECT greeting_audio FROM people WHERE id=?", (person_id,)).fetchone()
+    if not row or not row["greeting_audio"]:
+        raise HTTPException(404, "No greeting audio.")
+    path = GREETING_DIR / row["greeting_audio"]
+    if not path.exists():
+        raise HTTPException(404, "No greeting audio.")
+    return FileResponse(str(path))
+
+@app.delete("/api/people/{person_id}/greeting-audio")
+def delete_greeting_audio(person_id: int):
+    with connect() as con:
+        row = con.execute("SELECT greeting_audio FROM people WHERE id=?", (person_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "Person not found.")
+        _remove_greeting_file(row["greeting_audio"])
+        con.execute("UPDATE people SET greeting_audio='' WHERE id=?", (person_id,))
+        updated = con.execute("SELECT * FROM people WHERE id=?", (person_id,)).fetchone()
+    return public_person(updated)
 
 @app.get("/api/events")
 def events(limit: int = 100):
@@ -227,10 +288,12 @@ async def recognize(frame: UploadFile = File(...)):
         display = "Unknown visitor"
         person_id = None
         greeting = None
+        has_audio = False
         if person is not None:
             person_id = person["id"]
             display = person["name"]
             greeting = (person["greeting"] if "greeting" in person.keys() else "") or None
+            has_audio = bool(person["greeting_audio"]) if "greeting_audio" in person.keys() else False
             timestamp = now()
             with connect() as con:
                 # Debounce repeat events: one event per person per 30 seconds.
@@ -273,6 +336,8 @@ async def recognize(frame: UploadFile = File(...)):
             "recognizable": clear_enough,
             # Custom spoken greeting for a recognized person (None -> default).
             "greeting": greeting,
+            # True if an uploaded audio clip should play instead of TTS.
+            "has_greeting_audio": has_audio,
             # Enrollment needs a frontal, high-quality face for a good embedding.
             "enroll_ready": (face["facing"] == "Looking at camera"
                              and face["detection_score"] >= IDENTIFY_MIN_DETECTION),

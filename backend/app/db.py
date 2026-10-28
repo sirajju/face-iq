@@ -45,3 +45,6 @@ def _migrate(con):
     if "greeting" not in people_cols:
         # Optional custom spoken greeting; empty falls back to "Welcome back, <name>".
         con.execute("ALTER TABLE people ADD COLUMN greeting TEXT NOT NULL DEFAULT ''")
+    if "greeting_audio" not in people_cols:
+        # Filename of an uploaded greeting clip (in media/greetings); empty = use TTS.
+        con.execute("ALTER TABLE people ADD COLUMN greeting_audio TEXT NOT NULL DEFAULT ''")

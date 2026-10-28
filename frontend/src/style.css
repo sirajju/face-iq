@@ -14,3 +14,10 @@
 /* Recognition-alert toggles in settings */
 .toggle-row{display:flex;align-items:center;gap:10px;font-size:13px;color:#cdd8e6;margin:10px 0;cursor:pointer}
 .toggle-row input{width:16px;height:16px;accent-color:#5ed8a8;cursor:pointer}
+
+/* Per-person greeting voice clip controls */
+.audio-greeting{background:#131b26;border:1px solid #273343;border-radius:9px;padding:12px;margin:4px 0 2px}
+.audio-greeting>div:first-child b{font-size:13px;color:#e8eef6}
+.audio-greeting>div:first-child span{display:block;font-size:11px;color:#8495a8;margin-top:3px;line-height:1.5}
+.audio-actions{display:flex;gap:8px;align-items:center;margin-top:10px;flex-wrap:wrap}
+.file-btn{cursor:pointer;position:relative}
