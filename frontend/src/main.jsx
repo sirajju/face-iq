@@ -27,6 +27,13 @@ import {
 import "./style.css";
 
 const API = "http://127.0.0.1:8000/api";
+// Unknown-capture tuning. An unknown face must persist this long before we
+// snapshot it — longer than recognition's warm-up, so known people (identified
+// within the first few seconds) are never captured as unknown.
+const UNKNOWN_GRACE_MS = 6000;
+const TRACK_STALE_MS = 8000; // drop a tracklet not seen for this long
+const TRACK_MATCH_SIM = 0.5; // cosine similarity to treat two frames as same face
+const BOX_MATCH_DIST = 0.22; // normalised box-centre distance to match a known face
 const fmt = (v) => (v ? new Date(v).toLocaleString() : "Not seen yet");
 async function request(path, options = {}) {
   const res = await fetch(API + path, options);
@@ -65,6 +72,9 @@ function App() {
   const unknownBufRef = useRef([]);
   const greetedRef = useRef({}); // person_id -> last alert time (ms), debounce
   const audioRef = useRef(null); // lazily-created AudioContext for the chime
+  const tracksRef = useRef([]); // unknown-face tracklets for the grace window
+  const [captures, setCaptures] = useState([]);
+  const [captureNames, setCaptureNames] = useState({});
   const [form, setForm] = useState({
     name: "",
     notes: "",
@@ -97,16 +107,18 @@ function App() {
 
   const refresh = useCallback(async () => {
     try {
-      const [p, e, s, h] = await Promise.all([
+      const [p, e, s, h, c] = await Promise.all([
         request("/people"),
         request("/events?limit=100"),
         request("/stats"),
         request("/health"),
+        request("/unknown-captures"),
       ]);
       setPeople(p);
       setEvents(e);
       setStats(s);
       setHealth(h);
+      setCaptures(c);
     } catch (e) {
       setHealth({ ok: false, vision_ready: false, message: e.message });
     }
@@ -123,6 +135,7 @@ function App() {
       streamRef.current.getTracks().forEach((t) => t.stop());
     streamRef.current = null;
     if (videoRef.current) videoRef.current.srcObject = null;
+    tracksRef.current = [];
     setCameraOn(false);
     setFaces([]);
   }, []);
@@ -187,6 +200,8 @@ function App() {
       else setNotice("");
       // Sound / voice / desktop alerts fire only for recognized, registered people.
       data.faces.forEach((f) => f.known && alertRecognized(f));
+      // Track unknowns; snapshot one only after it persists past the grace window.
+      updateTracks(data.faces);
       if (data.faces.some((f) => f.known)) refresh();
     } catch (e) {
       setNotice(e.message);
@@ -298,6 +313,38 @@ function App() {
       setNotice(e.message);
     } finally {
       setQuickSaving(false);
+    }
+  };
+  const identifyCapture = async (cid) => {
+    const name = (captureNames[cid] || "").trim();
+    if (!name) {
+      setNotice("Enter a name for this snapshot.");
+      return;
+    }
+    try {
+      await request(`/unknown-captures/${cid}/identify`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      setCaptureNames((m) => {
+        const n = { ...m };
+        delete n[cid];
+        return n;
+      });
+      setNotice(`Saved "${name}" — recognized from now on.`);
+      refresh();
+    } catch (e) {
+      setNotice(e.message);
+    }
+  };
+  const dismissCapture = async (cid) => {
+    try {
+      await request(`/unknown-captures/${cid}`, { method: "DELETE" });
+      setNotice("Snapshot dismissed.");
+      refresh();
+    } catch (e) {
+      setNotice(e.message);
     }
   };
   const deletePerson = async (p) => {
@@ -425,6 +472,78 @@ function App() {
     if (alerts.desktop)
       notify("FaceIQ — recognized", `${face.name} is in view.`);
   };
+  // Snapshot the current frame and send it for "who was this?" review.
+  const captureUnknownSnapshot = () => {
+    const c = canvasRef.current;
+    if (!c) return;
+    c.toBlob(
+      (b) => {
+        if (!b) return;
+        const fd = new FormData();
+        fd.append("frame", b, "unknown.jpg");
+        request("/unknown-captures", { method: "POST", body: fd })
+          .then((r) => {
+            if (r && r.saved) refresh();
+          })
+          .catch(() => {});
+      },
+      "image/jpeg",
+      0.85,
+    );
+  };
+  // Track unknown faces across frames. A face is snapshotted only after it has
+  // stayed unknown past UNKNOWN_GRACE_MS; if it gets identified first, its
+  // tracklet is removed so no snapshot is taken (fixes the warm-up false capture).
+  const boxCenter = (b) => {
+    const vw = videoRef.current?.videoWidth || 1,
+      vh = videoRef.current?.videoHeight || 1;
+    return [(b.x + b.width / 2) / vw, (b.y + b.height / 2) / vh];
+  };
+  const updateTracks = (faces) => {
+    const now = Date.now();
+    const tracks = tracksRef.current.filter(
+      (t) => now - t.lastSeen <= TRACK_STALE_MS,
+    );
+    faces.forEach((f) => {
+      if (f.known) {
+        // A recognized face cancels a pending unknown tracklet at its location.
+        const [cx, cy] = boxCenter(f.box);
+        for (let i = tracks.length - 1; i >= 0; i--) {
+          const [tx, ty] = tracks[i].center;
+          if (Math.hypot(cx - tx, cy - ty) <= BOX_MATCH_DIST) tracks.splice(i, 1);
+        }
+        return;
+      }
+      if (!Array.isArray(f.embedding)) return;
+      let best = null,
+        bestSim = TRACK_MATCH_SIM;
+      tracks.forEach((t) => {
+        const sim = t.emb.reduce((s, v, k) => s + v * f.embedding[k], 0);
+        if (sim >= bestSim) {
+          bestSim = sim;
+          best = t;
+        }
+      });
+      if (best) {
+        best.lastSeen = now;
+        best.emb = f.embedding;
+        best.center = boxCenter(f.box);
+        if (!best.captured && now - best.firstSeen >= UNKNOWN_GRACE_MS) {
+          best.captured = true;
+          captureUnknownSnapshot();
+        }
+      } else {
+        tracks.push({
+          emb: f.embedding,
+          center: boxCenter(f.box),
+          firstSeen: now,
+          lastSeen: now,
+          captured: false,
+        });
+      }
+    });
+    tracksRef.current = tracks;
+  };
   // Map a detection box (raw, un-mirrored frame coords) onto the on-screen
   // video, accounting for object-fit:cover cropping and the scaleX(-1) mirror.
   const boxStyle = (box) => {
@@ -456,6 +575,7 @@ function App() {
   const nav = [
     ["Live", Video],
     ["People", Users],
+    ["Review", CircleHelp],
     ["Activity", Activity],
     ["Settings", Settings2],
   ];
@@ -482,6 +602,9 @@ function App() {
               <Icon size={18} />
               <span>{n}</span>
               {n === "People" && <small>{people.length}</small>}
+              {n === "Review" && captures.length > 0 && (
+                <small className="badge-alert">{captures.length}</small>
+              )}
             </button>
           ))}
         </nav>
@@ -512,9 +635,11 @@ function App() {
                 ? "Live recognition"
                 : page === "People"
                   ? "People & profiles"
-                  : page === "Activity"
-                    ? "Recognition activity"
-                    : "Privacy & settings"}
+                  : page === "Review"
+                    ? "Who was this?"
+                    : page === "Activity"
+                      ? "Recognition activity"
+                      : "Privacy & settings"}
             </h1>
           </div>
           <div className="top-actions">
@@ -884,6 +1009,75 @@ function App() {
                 ))}
               </div>
             )}
+          </div>
+        )}
+        {page === "Review" && (
+          <div className="content">
+            <div className="panel">
+              <div className="panel-head">
+                <div>
+                  <h2>Unknown visitor snapshots</h2>
+                  <p>
+                    Captured when a face stayed unrecognized for a few seconds.
+                    Name one to recognize that person automatically next time.
+                  </p>
+                </div>
+                <span className="count-badge">{captures.length}</span>
+              </div>
+              {captures.length === 0 ? (
+                <div className="empty-large">
+                  <CircleHelp size={30} />
+                  <h2>No snapshots to review</h2>
+                  <p>
+                    Unknown people who linger in view will show up here to be
+                    named.
+                  </p>
+                </div>
+              ) : (
+                <div className="people-grid">
+                  {captures.map((c) => (
+                    <div className="panel capture-card" key={c.id}>
+                      <img
+                        className="capture-img"
+                        src={`${API}${c.image_url}`}
+                        alt="Unknown visitor snapshot"
+                      />
+                      <span className="capture-time">
+                        <Clock3 size={13} /> {fmt(c.captured_at)}
+                      </span>
+                      <input
+                        placeholder="Who was this? Enter a name"
+                        value={captureNames[c.id] || ""}
+                        onChange={(e) =>
+                          setCaptureNames((m) => ({
+                            ...m,
+                            [c.id]: e.target.value,
+                          }))
+                        }
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") identifyCapture(c.id);
+                        }}
+                      />
+                      <div className="capture-actions">
+                        <button
+                          className="primary"
+                          onClick={() => identifyCapture(c.id)}
+                        >
+                          <Check size={15} /> Save as person
+                        </button>
+                        <button
+                          className="danger-icon"
+                          title="Dismiss snapshot"
+                          onClick={() => dismissCapture(c.id)}
+                        >
+                          <Trash2 size={16} />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
         )}
         {page === "Activity" && (

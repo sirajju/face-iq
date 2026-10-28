@@ -33,6 +33,14 @@ def init_db():
             confidence REAL,
             FOREIGN KEY(person_id) REFERENCES people(id) ON DELETE SET NULL
         );
+        CREATE TABLE IF NOT EXISTS unknown_captures (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            captured_at TEXT NOT NULL,
+            image TEXT NOT NULL,
+            embedding BLOB NOT NULL,
+            resolved INTEGER NOT NULL DEFAULT 0,
+            person_id INTEGER
+        );
         ''')
         _migrate(con)
 

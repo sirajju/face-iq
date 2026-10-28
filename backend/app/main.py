@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from pathlib import Path
 import json
+import uuid
 import numpy as np
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,6 +13,10 @@ from .vision import Vision
 # Uploaded per-person greeting clips live on disk, referenced by filename in DB.
 GREETING_DIR = Path(__file__).resolve().parents[1] / "media" / "greetings"
 GREETING_DIR.mkdir(parents=True, exist_ok=True)
+# Snapshots of unknown visitors awaiting "who was this?" identification.
+UNKNOWN_DIR = Path(__file__).resolve().parents[1] / "media" / "unknowns"
+UNKNOWN_DIR.mkdir(parents=True, exist_ok=True)
+UNKNOWN_DEDUP_SIMILARITY = 0.55  # skip a new snapshot if a similar one is already pending
 # Allowed upload types -> file extension used on disk.
 AUDIO_EXTS = {"audio/mpeg": ".mp3", "audio/mp3": ".mp3", "audio/wav": ".wav",
               "audio/x-wav": ".wav", "audio/webm": ".webm", "audio/ogg": ".ogg",
@@ -53,6 +58,26 @@ def public_person(row):
 
 def embedding_from_blob(blob):
     return np.frombuffer(blob, dtype=np.float32)
+
+def cosine(a, b):
+    if a.size != b.size:
+        return -1.0
+    return float(np.dot(a, b) / ((np.linalg.norm(a) * np.linalg.norm(b)) + 1e-12))
+
+def person_from_embeddings(con, name, embeddings, notes):
+    """Create a consenting person from one or more embeddings; returns the row."""
+    mean = np.mean(np.stack(embeddings), axis=0).astype(np.float32)
+    mean /= (np.linalg.norm(mean) + 1e-12)
+    ts = now()
+    cur = con.execute(
+        "INSERT INTO people(name, notes, interests, consent, created_at, first_seen, last_seen, visit_count, embedding) "
+        "VALUES(?,?,?,?,?,?,?,?,?)",
+        (name.strip(), notes, "", 1, ts, ts, ts, 1, mean.tobytes())
+    )
+    pid = cur.lastrowid
+    con.execute("INSERT INTO events(person_id,display_name,seen_at,expression,confidence,facing) VALUES(?,?,?,?,?,?)",
+                (pid, name.strip(), ts, "Neutral / unclear", 1.0, "Looking at camera"))
+    return con.execute("SELECT * FROM people WHERE id=?", (pid,)).fetchone()
 
 def match_embedding(embedding, threshold=MATCH_THRESHOLD):
     best, best_score = None, -1.0
@@ -126,26 +151,19 @@ class QuickEnrollBody(BaseModel):
     # reliable — good enough to name someone on the spot and recognize them later.
     embeddings: list[list[float]] = Field(min_length=1)
 
-@app.post("/api/people/quick")
-def quick_enroll(body: QuickEnrollBody):
-    vectors = [np.asarray(v, dtype=np.float32) for v in body.embeddings]
+def _validate_vectors(embeddings):
+    vectors = [np.asarray(v, dtype=np.float32) for v in embeddings]
     if any(v.ndim != 1 or v.size == 0 or not np.isfinite(v).all() for v in vectors):
         raise HTTPException(400, "Invalid face embedding.")
     if len({v.size for v in vectors}) != 1:
         raise HTTPException(400, "Face samples do not match.")
-    mean = np.mean(np.stack(vectors), axis=0).astype(np.float32)
-    mean /= (np.linalg.norm(mean) + 1e-12)
-    timestamp = now()
+    return vectors
+
+@app.post("/api/people/quick")
+def quick_enroll(body: QuickEnrollBody):
+    vectors = _validate_vectors(body.embeddings)
     with connect() as con:
-        cur = con.execute(
-            "INSERT INTO people(name, notes, interests, consent, created_at, first_seen, last_seen, visit_count, embedding) "
-            "VALUES(?,?,?,?,?,?,?,?,?)",
-            (body.name.strip(), "Named from live view.", "", 1, timestamp, timestamp, timestamp, 1, mean.tobytes())
-        )
-        person_id = cur.lastrowid
-        con.execute("INSERT INTO events(person_id,display_name,seen_at,expression,confidence,facing) VALUES(?,?,?,?,?,?)",
-                    (person_id, body.name.strip(), timestamp, "Neutral / unclear", 1.0, "Looking at camera"))
-        row = con.execute("SELECT * FROM people WHERE id=?", (person_id,)).fetchone()
+        row = person_from_embeddings(con, body.name, vectors, "Named from live view.")
     return public_person(row)
 
 @app.delete("/api/people/{person_id}")
@@ -223,6 +241,95 @@ def delete_greeting_audio(person_id: int):
         updated = con.execute("SELECT * FROM people WHERE id=?", (person_id,)).fetchone()
     return public_person(updated)
 
+def _remove_unknown_file(stored):
+    if stored:
+        try:
+            (UNKNOWN_DIR / stored).unlink(missing_ok=True)
+        except Exception:
+            pass
+
+def public_capture(row):
+    return {"id": row["id"], "captured_at": row["captured_at"],
+            "image_url": f"/api/unknown-captures/{row['id']}/image"}
+
+@app.post("/api/unknown-captures")
+async def add_unknown_capture(frame: UploadFile = File(...)):
+    # Called by the frontend ONLY after an unknown face has persisted past the
+    # grace window (so warm-up frames of known people are never captured here).
+    if vision is None:
+        raise HTTPException(503, "Vision models are not ready.")
+    raw = await frame.read()
+    if len(raw) > 8_000_000:
+        raise HTTPException(413, "Frame too large.")
+    try:
+        _, faces = vision.analyze(raw)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    if not faces:
+        raise HTTPException(400, "No face found in snapshot.")
+    # Largest (closest) face is the subject of the snapshot.
+    face = max(faces, key=lambda f: f["box"]["width"] * f["box"]["height"])
+    emb = np.asarray(face["embedding"], dtype=np.float32)
+    # If this face is actually a known person, don't file it as unknown.
+    person, _ = match_embedding(emb)
+    if person is not None:
+        return {"saved": False, "reason": "known"}
+    with connect() as con:
+        pending = con.execute("SELECT id, embedding FROM unknown_captures WHERE resolved=0").fetchall()
+        for r in pending:
+            if cosine(emb, embedding_from_blob(r["embedding"])) >= UNKNOWN_DEDUP_SIMILARITY:
+                return {"saved": False, "reason": "duplicate", "capture_id": r["id"]}
+        fname = f"{uuid.uuid4().hex}.jpg"
+        (UNKNOWN_DIR / fname).write_bytes(raw)
+        cur = con.execute(
+            "INSERT INTO unknown_captures(captured_at, image, embedding, resolved) VALUES(?,?,?,0)",
+            (now(), fname, emb.tobytes())
+        )
+        capture_id = cur.lastrowid
+    return {"saved": True, "capture_id": capture_id}
+
+@app.get("/api/unknown-captures")
+def list_unknown_captures():
+    with connect() as con:
+        rows = con.execute("SELECT * FROM unknown_captures WHERE resolved=0 ORDER BY id DESC").fetchall()
+    return [public_capture(r) for r in rows]
+
+@app.get("/api/unknown-captures/{capture_id}/image")
+def unknown_capture_image(capture_id: int):
+    with connect() as con:
+        row = con.execute("SELECT image FROM unknown_captures WHERE id=?", (capture_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "Capture not found.")
+    path = UNKNOWN_DIR / row["image"]
+    if not path.exists():
+        raise HTTPException(404, "Capture image missing.")
+    return FileResponse(str(path))
+
+class IdentifyCaptureBody(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+
+@app.post("/api/unknown-captures/{capture_id}/identify")
+def identify_unknown_capture(capture_id: int, body: IdentifyCaptureBody):
+    with connect() as con:
+        row = con.execute("SELECT * FROM unknown_captures WHERE id=? AND resolved=0", (capture_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "Capture not found or already resolved.")
+        emb = embedding_from_blob(row["embedding"])
+        person = person_from_embeddings(con, body.name, [emb], "Identified from an unknown snapshot.")
+        con.execute("UPDATE unknown_captures SET resolved=1, person_id=? WHERE id=?", (person["id"], capture_id))
+    _remove_unknown_file(row["image"])  # keep only the embedding once named
+    return public_person(person)
+
+@app.delete("/api/unknown-captures/{capture_id}")
+def dismiss_unknown_capture(capture_id: int):
+    with connect() as con:
+        row = con.execute("SELECT image FROM unknown_captures WHERE id=?", (capture_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "Capture not found.")
+        _remove_unknown_file(row["image"])
+        con.execute("DELETE FROM unknown_captures WHERE id=?", (capture_id,))
+    return {"ok": True}
+
 @app.get("/api/events")
 def events(limit: int = 100):
     limit = max(1, min(limit, 500))
@@ -237,8 +344,10 @@ def stats():
         known_visits = con.execute("SELECT COALESCE(SUM(visit_count),0) FROM people").fetchone()[0]
         events_count = con.execute("SELECT COUNT(*) FROM events").fetchone()[0]
         unknown_count = con.execute("SELECT COUNT(*) FROM events WHERE person_id IS NULL").fetchone()[0]
+        pending_unknowns = con.execute("SELECT COUNT(*) FROM unknown_captures WHERE resolved=0").fetchone()[0]
     return {"people": people_count, "known_visits": known_visits,
-            "events": events_count, "unknown_events": unknown_count}
+            "events": events_count, "unknown_events": unknown_count,
+            "pending_unknowns": pending_unknowns}
 
 @app.post("/api/enrollment-sample")
 async def enrollment_sample(frame: UploadFile = File(...)):

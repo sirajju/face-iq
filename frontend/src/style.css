@@ -21,3 +21,12 @@
 .audio-greeting>div:first-child span{display:block;font-size:11px;color:#8495a8;margin-top:3px;line-height:1.5}
 .audio-actions{display:flex;gap:8px;align-items:center;margin-top:10px;flex-wrap:wrap}
 .file-btn{cursor:pointer;position:relative}
+
+/* Unknown-visitor review captures */
+.badge-alert{background:#ffbd6f !important;color:#2b1b09 !important;border-radius:9px;padding:1px 7px;font-weight:700}
+.capture-card{display:flex;flex-direction:column;gap:9px}
+.capture-img{width:100%;aspect-ratio:4/3;object-fit:cover;border-radius:8px;border:1px solid #273343;background:#0b1017;transform:scaleX(-1)}
+.capture-time{display:flex;align-items:center;gap:5px;font-size:11px;color:#8495a8}
+.capture-card input{width:100%}
+.capture-actions{display:flex;gap:8px;align-items:center}
+.capture-actions .primary{flex:1}
