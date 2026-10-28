@@ -217,6 +217,21 @@ function App() {
     }, 1000);
     return () => clearInterval(id);
   }, [cameraOn]);
+  // Re-attach the running stream when returning to the Live page. Navigating away
+  // unmounts the <video>; coming back mounts a fresh one with no srcObject, so
+  // the camera looks "running" (Stop camera) but shows nothing until we rebind.
+  useEffect(() => {
+    if (
+      page === "Live" &&
+      cameraOn &&
+      streamRef.current &&
+      videoRef.current &&
+      videoRef.current.srcObject !== streamRef.current
+    ) {
+      videoRef.current.srcObject = streamRef.current;
+      videoRef.current.play().catch(() => {});
+    }
+  }, [page, cameraOn]);
   const stopCamera = useCallback(() => {
     if (timerRef.current) clearInterval(timerRef.current);
     timerRef.current = null;

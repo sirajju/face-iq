@@ -1,5 +1,9 @@
 // Dll.cpp — COM DLL plumbing: class factory, exports, refcounts, self-register.
+// initguid.h before common.h/propkey.h allocates the GUID + PKEY definitions in
+// THIS translation unit (other files only reference them as extern).
+#include <initguid.h>
 #include "common.h"
+#include <propkey.h>
 #include "CFaceProvider.h"
 #include <new>
 #include <strsafe.h>

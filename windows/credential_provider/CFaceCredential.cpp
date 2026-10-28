@@ -3,6 +3,7 @@
 #include "helpers.h"
 #include "FaceIpc.h"
 #include <ntsecapi.h>
+#include <propkey.h>
 #include <strsafe.h>
 
 CFaceCredential::CFaceCredential() { DllAddRef(); }
@@ -47,7 +48,7 @@ IFACEMETHODIMP CFaceCredential::QueryInterface(REFIID riid, void** ppv)
 
 HRESULT CFaceCredential::Initialize(CREDENTIAL_PROVIDER_USAGE_SCENARIO cpus,
                                     const CREDENTIAL_PROVIDER_FIELD_DESCRIPTOR* rgcpfd,
-                                    const CREDENTIAL_PROVIDER_FIELD_STATE_PAIR* rgfsp,
+                                    const FIELD_STATE_PAIR* rgfsp,
                                     ICredentialProviderUser* pcpUser)
 {
     _cpus = cpus;
@@ -214,7 +215,7 @@ IFACEMETHODIMP CFaceCredential::GetSerialization(
             {
                 pcpcs->ulAuthenticationPackage = ulAuthPackage;
                 pcpcs->clsidCredentialProvider = CLSID_FaceIQProvider;
-                *pcpgsr = CPGSR_RETURN_CREDENTIAL;
+                *pcpgsr = CPGSR_RETURN_CREDENTIAL_FINISHED;
             }
         }
     }

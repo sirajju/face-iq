@@ -9,6 +9,7 @@
 #pragma once
 
 #include <windows.h>
+#include <shlwapi.h>   // SHStrDupW
 #include <credentialprovider.h>
 
 HRESULT FieldDescriptorCopy(const CREDENTIAL_PROVIDER_FIELD_DESCRIPTOR& rcpfd,

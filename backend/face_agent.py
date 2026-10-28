@@ -24,12 +24,22 @@ import threading
 import time
 from pathlib import Path
 
+# Quiet OpenCV's VIDEOIO/DSHOW warnings when the camera is busy or absent. Must
+# be set BEFORE importing cv2 to take effect.
+os.environ.setdefault("OPENCV_LOG_LEVEL", "SILENT")
+os.environ.setdefault("OPENCV_VIDEOIO_DEBUG", "0")
+
 import cv2
 import numpy as np
 
 import win32pipe
 import win32file
 import pywintypes
+
+try:
+    cv2.utils.logging.setLogLevel(cv2.utils.logging.LOG_LEVEL_SILENT)
+except Exception:
+    pass
 
 from app.db import connect
 from app.vision import Vision
@@ -87,46 +97,77 @@ class CameraWorker(threading.Thread):
         self.last_frame_at = 0.0
         self.last_owner_at = 0.0
         self.stop_flag = False
+        self._last_log = 0.0
+
+    def _maybe_log(self, msg):
+        now = time.time()
+        if now - self._last_log >= 5.0:
+            self._last_log = now
+            log(msg)
 
     def run(self):
         cap = None
-        while not self.stop_flag:
+        backoff = 1.0  # grows while the camera is unavailable, to avoid spamming
+        try:
+          while not self.stop_flag:
             if cap is None:
                 cap = cv2.VideoCapture(self.camera_index, cv2.CAP_DSHOW)
                 if not cap.isOpened():
                     cap.release()
                     cap = cv2.VideoCapture(self.camera_index, cv2.CAP_MSMF)
                 if not cap.isOpened():
-                    time.sleep(1.0)
+                    cap.release()
                     cap = None
+                    # Busy/absent camera: back off quietly (status stays NOCAM).
+                    self._maybe_log("status=NOCAM camera=DOWN (can't open - another "
+                                    "app likely holds the webcam, e.g. the FaceIQ Live "
+                                    "view, Zoom, Teams, or the Camera app)")
+                    time.sleep(backoff)
+                    backoff = min(backoff * 1.5, 5.0)
                     continue
+                backoff = 1.0
             ok, frame = cap.read()
             if not ok or frame is None:
                 # Camera down / no frames -> leave last_frame_at stale (NOCAM).
-                time.sleep(0.5)
                 cap.release()
                 cap = None
+                self._maybe_log("status=NOCAM camera=DOWN (opened but no frames - "
+                                "the webcam is in use by another app)")
+                time.sleep(backoff)
+                backoff = min(backoff * 1.5, 5.0)
                 continue
+            backoff = 1.0
             now = time.time()
             with self.lock:
                 self.last_frame_at = now
             owners = load_owner_embeddings()
+            n_faces = 0
+            best = -1.0
             if owners:
                 ok2, buf = cv2.imencode(".jpg", frame)
                 if ok2:
                     try:
                         _, faces = self.vision.analyze(buf.tobytes())
+                        n_faces = len(faces)
                         for face in faces:
                             emb = np.asarray(face["embedding"], dtype=np.float32)
-                            if any(cosine(emb, o) >= OWNER_MATCH_THRESHOLD for o in owners):
+                            s = max((cosine(emb, o) for o in owners), default=-1.0)
+                            best = max(best, s)
+                            if s >= OWNER_MATCH_THRESHOLD:
                                 with self.lock:
                                     self.last_owner_at = now
-                                break
                     except Exception:
                         pass
+            self._maybe_log(
+                f"status={self.status()} camera=up faces={n_faces} "
+                f"owners={len(owners)} best_owner_sim={best:.2f} "
+                f"(need >= {OWNER_MATCH_THRESHOLD} to match)"
+            )
             time.sleep(0.4)
-        if cap is not None:
-            cap.release()
+        finally:
+            # Always release the webcam when the worker stops (Ctrl+C included).
+            if cap is not None:
+                cap.release()
 
     def status(self):
         now = time.time()
@@ -179,6 +220,27 @@ def make_pipe():
     )
 
 
+def pipe_server(key, worker, stop):
+    # Runs in a daemon thread. The blocking ConnectNamedPipe can't be interrupted
+    # by Ctrl+C, so we keep it OFF the main thread; the process exit tears it down.
+    while not stop.is_set():
+        try:
+            pipe = make_pipe()
+        except pywintypes.error:
+            time.sleep(0.5)
+            continue
+        try:
+            win32pipe.ConnectNamedPipe(pipe, None)
+            handle_client(pipe, key, worker)
+        except pywintypes.error:
+            pass
+        finally:
+            try:
+                win32file.CloseHandle(pipe)
+            except Exception:
+                pass
+
+
 def main():
     log("FaceIQ face agent starting. It only REPORTS a face result; it never signs you in.")
     key = load_key()
@@ -189,19 +251,22 @@ def main():
         return 1
     worker = CameraWorker(vision)
     worker.start()
-    log("Serving named pipe. Ctrl+C to stop.")
+    stop = threading.Event()
+    server = threading.Thread(target=pipe_server, args=(key, worker, stop), daemon=True)
+    server.start()
+    log("Serving named pipe. Press Ctrl+C to stop.")
     try:
+        # Interruptible wait on the main thread so Ctrl+C stops the agent cleanly.
         while True:
-            pipe = make_pipe()
-            try:
-                win32pipe.ConnectNamedPipe(pipe, None)
-                handle_client(pipe, key, worker)
-            finally:
-                win32file.CloseHandle(pipe)
+            time.sleep(0.5)
     except KeyboardInterrupt:
-        log("Stopped by user.")
+        log("Stopping…")
     finally:
+        stop.set()
         worker.stop_flag = True
+        # Wait for the worker to exit its loop and release the webcam.
+        worker.join(timeout=4)
+        log("Camera released. Bye.")
     return 0
 
 

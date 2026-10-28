@@ -45,7 +45,7 @@ public:
 
     HRESULT Initialize(CREDENTIAL_PROVIDER_USAGE_SCENARIO cpus,
                        const CREDENTIAL_PROVIDER_FIELD_DESCRIPTOR* rgcpfd,
-                       const CREDENTIAL_PROVIDER_FIELD_STATE_PAIR* rgfsp,
+                       const FIELD_STATE_PAIR* rgfsp,
                        ICredentialProviderUser* pcpUser);
     CFaceCredential();
 
@@ -54,7 +54,7 @@ private:
     long _cRef = 1;
     CREDENTIAL_PROVIDER_USAGE_SCENARIO _cpus = CPUS_INVALID;
     CREDENTIAL_PROVIDER_FIELD_DESCRIPTOR _rgFieldDescriptors[FFI_NUM_FIELDS] = {};
-    CREDENTIAL_PROVIDER_FIELD_STATE_PAIR _rgFieldStatePairs[FFI_NUM_FIELDS] = {};
+    FIELD_STATE_PAIR _rgFieldStatePairs[FFI_NUM_FIELDS] = {};
     PWSTR _rgFieldStrings[FFI_NUM_FIELDS] = {};
     PWSTR _pszUserSid = nullptr;
     PWSTR _pszQualifiedUserName = nullptr;

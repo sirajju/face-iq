@@ -3,6 +3,7 @@
 #include <bcrypt.h>
 #include <strsafe.h>
 #include <stdio.h>
+#include <time.h>
 #include <string>
 
 #pragma comment(lib, "bcrypt.lib")

@@ -16,7 +16,15 @@
 
 #include <windows.h>
 #include <strsafe.h>
+#include <shlwapi.h>   // SHStrDupW
 #include <credentialprovider.h>
+
+// The SDK has no "field state pair" struct; providers define their own.
+struct FIELD_STATE_PAIR
+{
+    CREDENTIAL_PROVIDER_FIELD_STATE cpfs;
+    CREDENTIAL_PROVIDER_FIELD_INTERACTIVE_STATE cpfis;
+};
 
 // {7F3B9E42-1C6A-4D2E-9B51-6F2A1E9D4C80}  — unique CLSID for THIS provider.
 // Generate your own with guidgen / uuidgen before shipping; do not reuse.
@@ -45,7 +53,7 @@ static const CREDENTIAL_PROVIDER_FIELD_DESCRIPTOR s_fieldDescriptors[] =
 };
 
 // Field state table — what is visible/interactive on the (unselected/selected) tile.
-static const CREDENTIAL_PROVIDER_FIELD_STATE_PAIR s_fieldStatePairs[] =
+static const FIELD_STATE_PAIR s_fieldStatePairs[] =
 {
     { CPFS_DISPLAY_IN_BOTH,            CPFIS_NONE    }, // FFI_TILEIMAGE
     { CPFS_DISPLAY_IN_BOTH,            CPFIS_NONE    }, // FFI_LABEL

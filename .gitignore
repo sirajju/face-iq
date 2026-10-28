@@ -5,6 +5,9 @@ models
 media
 build
 *.dll
+*.obj
+*.lib
+*.exp
 *.sqlite*
 .env
 *.env
