@@ -89,6 +89,7 @@ function App() {
     owners: [],
     auto_lock_armed: false,
     auto_lock_grace: 20,
+    lock_on_unknown: false,
   });
   const [form, setForm] = useState({
     name: "",
@@ -153,6 +154,7 @@ function App() {
       armed: !!ownerStatus.auto_lock_armed,
       grace: ownerStatus.auto_lock_grace || 20,
       ownerIds: new Set(people.filter((p) => p.is_owner).map((p) => p.id)),
+      lockOnUnknown: !!ownerStatus.lock_on_unknown,
     };
   }, [people, ownerStatus]);
   // True only when the webcam is genuinely delivering frames. A disconnected,
@@ -531,6 +533,29 @@ function App() {
       setNotice(e.message);
     }
   };
+  const applyLockOnUnknown = async (enabled) => {
+    if (enabled && !ownerStatus.owners.length) {
+      setNotice("Enroll & tick yourself as Owner first, or it will lock on you.");
+      return;
+    }
+    const pin = await ensureOwnerPin();
+    if (!pin) return;
+    try {
+      await request("/owner/lock-on-unknown", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled, pin }),
+      });
+      setNotice(
+        enabled
+          ? "Will lock when an unknown person appears."
+          : "Lock-on-unknown disabled.",
+      );
+      refresh();
+    } catch (e) {
+      setNotice(e.message);
+    }
+  };
   const identifyCapture = async (cid) => {
     const name = (captureNames[cid] || "").trim();
     if (!name) {
@@ -712,6 +737,20 @@ function App() {
     if (face?.person_id != null) greetedRef.current[face.person_id] = now;
   };
   // Snapshot the current frame and send it for "who was this?" review.
+  // Ask the backend to LOCK (shared by the owner-absence timer and stranger lock).
+  // Guarded so we don't fire repeatedly; 30s cooldown.
+  const triggerLock = () => {
+    if (lockingRef.current) return;
+    lockingRef.current = true;
+    setLockCountdown(0);
+    request("/lock", { method: "POST" })
+      .catch(() => {})
+      .finally(() => {
+        ownerLastSeenRef.current = Date.now() + 30000;
+        lockingRef.current = false;
+        setLockCountdown(null);
+      });
+  };
   const captureUnknownSnapshot = () => {
     const c = canvasRef.current;
     if (!c) return;
@@ -770,6 +809,8 @@ function App() {
         if (!best.captured && now - best.firstSeen >= UNKNOWN_GRACE_MS) {
           best.captured = true;
           captureUnknownSnapshot();
+          // Confirmed stranger (stayed unrecognized past the grace) -> lock if enabled.
+          if (ownerCfgRef.current.lockOnUnknown) triggerLock();
         }
       } else {
         tracks.push({
@@ -1563,6 +1604,19 @@ function App() {
                   {ownerStatus.auto_lock_armed ? "Disarm" : "Arm auto-lock"}
                 </button>
               </div>
+              <label className="toggle-row">
+                <input
+                  type="checkbox"
+                  checked={!!ownerStatus.lock_on_unknown}
+                  onChange={(e) => applyLockOnUnknown(e.target.checked)}
+                />
+                <span>
+                  <b>Lock when an unknown person appears</b> — leave the PC
+                  unlocked; it locks automatically if someone who isn't an
+                  enrolled person shows up in the camera. (Keep the app + camera
+                  running. Enroll yourself as Owner so it never locks on you.)
+                </span>
+              </label>
               <p className="small-hint">
                 Run the companion in your session:{" "}
                 <code>

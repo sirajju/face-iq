@@ -383,6 +383,10 @@ class AutoLockBody(BaseModel):
     grace_seconds: int = Field(default=20, ge=5, le=600)
     pin: str = Field(min_length=1, max_length=32)
 
+class LockOnUnknownBody(BaseModel):
+    enabled: bool
+    pin: str = Field(min_length=1, max_length=32)
+
 @app.get("/api/owner/status")
 def owner_status():
     with connect() as con:
@@ -390,8 +394,10 @@ def owner_status():
         owners = con.execute("SELECT id, name FROM people WHERE is_owner=1").fetchall()
         armed = get_setting(con, "auto_lock_armed", "0") == "1"
         grace = int(get_setting(con, "auto_lock_grace", "20") or 20)
+        lock_on_unknown = get_setting(con, "lock_on_unknown", "0") == "1"
     return {"pin_set": pin_set, "owners": [dict(o) for o in owners],
-            "auto_lock_armed": armed, "auto_lock_grace": grace}
+            "auto_lock_armed": armed, "auto_lock_grace": grace,
+            "lock_on_unknown": lock_on_unknown}
 
 @app.post("/api/owner/pin")
 def set_owner_pin(body: SetPinBody):
@@ -442,13 +448,15 @@ def owner_presence():
 
 @app.post("/api/lock")
 def lock_now():
-    """Lock the Windows workstation. Called by the frontend auto-lock timer when
-    the Owner has been absent past the grace period. Locking is safe and
-    recoverable (your normal Windows sign-in reverses it); it stores/uses no
-    credentials and never unlocks. Gated on auto-lock being armed."""
+    """Lock the Windows workstation. Called by the frontend when the Owner has been
+    absent past the grace period, OR when an unknown person appears (if enabled).
+    Locking is safe and recoverable (your normal Windows sign-in reverses it);
+    it stores/uses no credentials and never unlocks."""
     with connect() as con:
-        if get_setting(con, "auto_lock_armed", "0") != "1":
-            raise HTTPException(400, "Auto-lock is not armed.")
+        armed = get_setting(con, "auto_lock_armed", "0") == "1"
+        lock_on_unknown = get_setting(con, "lock_on_unknown", "0") == "1"
+    if not (armed or lock_on_unknown):
+        raise HTTPException(400, "No auto-lock mode is enabled.")
     try:
         import ctypes
         ctypes.windll.user32.LockWorkStation()
@@ -464,6 +472,14 @@ def set_auto_lock(body: AutoLockBody):
         set_setting(con, "auto_lock_armed", "1" if body.armed else "0")
         set_setting(con, "auto_lock_grace", str(body.grace_seconds))
     return {"ok": True, "auto_lock_armed": body.armed, "auto_lock_grace": body.grace_seconds}
+
+@app.post("/api/owner/lock-on-unknown")
+def set_lock_on_unknown(body: LockOnUnknownBody):
+    with connect() as con:
+        if not verify_owner_pin(con, body.pin):
+            raise HTTPException(403, "Incorrect Owner PIN.")
+        set_setting(con, "lock_on_unknown", "1" if body.enabled else "0")
+    return {"ok": True, "lock_on_unknown": body.enabled}
 
 @app.get("/api/events")
 def events(limit: int = 100):
